@@ -54,4 +54,39 @@ public class ContractsTests
     {
         Assert.Throws<AiException>(() => AiJson.Deserialize<TableMatchResponse>("not json at all"));
     }
+
+    [Fact]
+    public void A_required_field_missing_entirely_throws_AiException()
+    {
+        const string json = """
+            {"matches":[{"sourceTable":"dbo.Customer","targetTable":"dbo.Client","confidence":0.96}]}
+            """;
+
+        var ex = Assert.Throws<AiException>(() => AiJson.Deserialize<TableMatchResponse>(json));
+        Assert.Contains("Reason", ex.Message);
+    }
+
+    [Fact]
+    public void A_required_string_field_explicitly_null_throws_AiException()
+    {
+        const string json = """
+            {"columns":[{"targetColumn":"FullName","rule":"concat","expression":null,"confidence":0.9,"reason":"Two parts."}]}
+            """;
+
+        var ex = Assert.Throws<AiException>(() => AiJson.Deserialize<ColumnMapResponse>(json));
+        Assert.Contains("expression", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Omitting_the_genuinely_optional_unmapped_array_still_succeeds()
+    {
+        const string json = """
+            {"columns":[{"targetColumn":"FullName","rule":"concat","expression":"CONCAT(FirstName, ' ', LastName)","confidence":0.9,"reason":"Two parts."}]}
+            """;
+
+        var parsed = AiJson.Deserialize<ColumnMapResponse>(json);
+
+        Assert.Equal("FullName", Assert.Single(parsed.Columns).TargetColumn);
+        Assert.Empty(parsed.Unmapped);
+    }
 }

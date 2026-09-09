@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace SqlMigrator.Ai;
 
@@ -14,7 +15,11 @@ public sealed class AiException : Exception
     }
 }
 
-public sealed record TableMatch(string SourceTable, string TargetTable, double Confidence, string Reason);
+public sealed record TableMatch(
+    [property: JsonRequired] string SourceTable,
+    [property: JsonRequired] string TargetTable,
+    [property: JsonRequired] double Confidence,
+    [property: JsonRequired] string Reason);
 
 public sealed record TableMatchResponse(List<TableMatch>? Matches)
 {
@@ -22,9 +27,15 @@ public sealed record TableMatchResponse(List<TableMatch>? Matches)
 }
 
 public sealed record ColumnProposal(
-    string TargetColumn, string Rule, string Expression, double Confidence, string Reason);
+    [property: JsonRequired] string TargetColumn,
+    [property: JsonRequired] string Rule,
+    [property: JsonRequired] string Expression,
+    [property: JsonRequired] double Confidence,
+    [property: JsonRequired] string Reason);
 
-public sealed record UnmappedProposal(string TargetColumn, string Reason);
+public sealed record UnmappedProposal(
+    [property: JsonRequired] string TargetColumn,
+    [property: JsonRequired] string Reason);
 
 public sealed record ColumnMapResponse(List<ColumnProposal>? Columns, List<UnmappedProposal>? Unmapped)
 {
@@ -36,7 +47,8 @@ public static class AiJson
 {
     private static readonly JsonSerializerOptions Options = new()
     {
-        PropertyNameCaseInsensitive = true
+        PropertyNameCaseInsensitive = true,
+        RespectNullableAnnotations = true
     };
 
     public static T Deserialize<T>(string json)
