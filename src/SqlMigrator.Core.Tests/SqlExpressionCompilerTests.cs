@@ -75,4 +75,21 @@ public class SqlExpressionCompilerTests
         Assert.False(result.Ok);
         Assert.NotNull(result.Error);
     }
+
+    /// <summary>
+    /// A CompileResult failure must mean 'SQL Server rejected this expression' and nothing
+    /// else. An unreachable server raises SqlException too, so if the connection open were
+    /// inside the same catch, a database outage would be reported as a bad expression and
+    /// send a human to rewrite perfectly good SQL. This pins the distinction.
+    /// </summary>
+    [Fact]
+    public async Task An_unreachable_server_throws_rather_than_reporting_a_bad_expression()
+    {
+        var unreachable = new SqlExpressionCompiler(
+            "Server=localhost,14330;Database=NoSuchDb;Integrated Security=True;" +
+            "TrustServerCertificate=True;Connect Timeout=2");
+
+        await Assert.ThrowsAnyAsync<Exception>(
+            () => unreachable.CompileAsync("dbo.Customer", "Email"));
+    }
 }

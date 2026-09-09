@@ -28,11 +28,16 @@ public sealed class SqlExpressionCompiler(string sourceConnectionString) : IExpr
     {
         var sql = $"SELECT TOP 0 ({expression}) AS [Value] FROM {Quote(sourceTableFullName)}";
 
+        // Opening the connection sits OUTSIDE the try on purpose. A login failure or an
+        // unreachable server raises SqlException just as a bad expression does, so catching
+        // around the open would report "your expression did not compile" when the real
+        // problem is that the database cannot be reached — sending a human to rewrite
+        // perfectly good SQL. Only the compile itself is allowed to become a Failure.
+        await using var conn = new SqlConnection(sourceConnectionString);
+        await conn.OpenAsync(ct);
+
         try
         {
-            await using var conn = new SqlConnection(sourceConnectionString);
-            await conn.OpenAsync(ct);
-
             await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 15 };
             await using var reader = await cmd.ExecuteReaderAsync(CommandBehavior.SchemaOnly, ct);
 
