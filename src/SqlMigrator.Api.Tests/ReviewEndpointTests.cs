@@ -6,6 +6,7 @@ using SqlMigrator.Api;
 
 namespace SqlMigrator.Api.Tests;
 
+[Collection("api-sql")]
 public class ReviewEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly HttpClient _client;
@@ -21,9 +22,9 @@ public class ReviewEndpointTests : IClassFixture<WebApplicationFactory<Program>>
     private async Task<(string SessionId, MappingDto Mapping)> ReadySession()
     {
         var started = (await (await _client.PostAsJsonAsync("/api/analyse", new AnalyseRequest(
-            new ConnectionRequest(Server, "SqlMigratorDemo_Source"),
-            new ConnectionRequest(Server, "SqlMigratorDemo_Target"),
-            "[SqlMigratorDemo_Source]"))).Content.ReadFromJsonAsync<AnalyseStarted>())!;
+            new ConnectionRequest(Server, ApiTestDatabases.SourceDb),
+            new ConnectionRequest(Server, ApiTestDatabases.TargetDb),
+            $"[{ApiTestDatabases.SourceDb}]"))).Content.ReadFromJsonAsync<AnalyseStarted>())!;
 
         for (var attempt = 0; attempt < 120; attempt++)
         {
