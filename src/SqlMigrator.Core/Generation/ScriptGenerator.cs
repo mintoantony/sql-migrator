@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text;
-using SqlMigrator.Core.Mapping;
-using SqlMigrator.Core.Schema;
+using SqlMigrator.Model.Mapping;
+using SqlMigrator.Model.Schema;
 
 namespace SqlMigrator.Core.Generation;
 
