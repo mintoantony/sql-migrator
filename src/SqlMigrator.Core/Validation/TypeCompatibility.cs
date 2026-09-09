@@ -61,6 +61,14 @@ public static class TypeCompatibility
 
         if (sourceCategory != targetCategory || sourceCategory == TypeCategory.Other)
         {
+            // An unmapped type (spatial, hierarchyid, sql_variant, CLR UDTs, …) has no length or
+            // precision semantics to compare, but copying a column into a column of the exact same
+            // type is trivially valid — only rescue pairs this guard would otherwise reject outright.
+            if (string.Equals(source.DataType, target.DataType, StringComparison.OrdinalIgnoreCase))
+            {
+                return new TypeCheck(true, false, null);
+            }
+
             return new TypeCheck(false, false,
                 $"Expression yields {source.DataType} but target column is {target.DataType}; " +
                 "these types are not convertible by an INSERT … SELECT.");
