@@ -1,3 +1,4 @@
+using System.Net.Http;
 using SqlMigrator.Model.Mapping;
 using SqlMigrator.Model.Schema;
 
@@ -104,12 +105,20 @@ public sealed class MappingProposer(IChatClient client, AiOptions options)
         }
 
         var columns = new List<ColumnMapping>();
+        var seenTargetColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var proposal in parsed.Columns)
         {
             if (targetTable.Column(proposal.TargetColumn) is null)
             {
                 failures.Add($"Model proposed target column {targetTable.FullName}.{proposal.TargetColumn}, " +
                              "which does not exist. Dropped.");
+                continue;
+            }
+
+            if (!seenTargetColumns.Add(proposal.TargetColumn))
+            {
+                failures.Add($"Model proposed target column {targetTable.FullName}.{proposal.TargetColumn} " +
+                             "more than once. Kept the first proposal and discarded this one.");
                 continue;
             }
 
@@ -134,7 +143,18 @@ public sealed class MappingProposer(IChatClient client, AiOptions options)
             sourceTable.FullName, targetTable.FullName, columns, unmapped, Origin.Ai, null, null);
     }
 
-    /// <summary>One retry, then give up. A model that fails twice is reported, not guessed at.</summary>
+    /// <summary>
+    /// One retry, then give up. A model that fails twice is reported, not guessed at.
+    ///
+    /// A failure for this table pair alone — bad JSON, a provider error, a network blip, or a
+    /// provider-side timeout — is recorded in <paramref name="failures"/> and the caller moves on
+    /// to the next table. A genuine caller cancellation (the caller's own <paramref name="ct"/>
+    /// firing) is different: it must abort the whole run, so it is left to propagate rather than
+    /// being collected as a per-table failure. <see cref="NimChatClient"/> implements its
+    /// per-request timeout as a token linked to <paramref name="ct"/>, so a timeout also surfaces
+    /// as <see cref="OperationCanceledException"/> — the two are told apart by checking whether
+    /// the caller's own token is the one that actually fired.
+    /// </summary>
     private async Task<string?> CallWithOneRetry(
         string system, string user, List<string> failures, string label, CancellationToken ct)
     {
@@ -145,7 +165,13 @@ public sealed class MappingProposer(IChatClient client, AiOptions options)
             {
                 response = await client.CompleteJsonAsync(system, user, ct);
             }
-            catch (AiException ex)
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // The provider's own request timeout fired, not the caller's cancellation.
+                if (attempt == 2) { failures.Add($"Gave up on {label}: the model provider timed out."); return null; }
+                continue;
+            }
+            catch (Exception ex) when (ex is AiException or HttpRequestException)
             {
                 if (attempt == 2) { failures.Add($"Gave up on {label}: {ex.Message}"); return null; }
                 continue;
