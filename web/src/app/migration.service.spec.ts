@@ -1,7 +1,12 @@
 import { TestBed } from '@angular/core/testing';
-import { provideHttpClient } from '@angular/common/http';
+import { HttpErrorResponse, provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { MigrationService } from './migration.service';
+import { Mapping, SessionStatus } from './models';
+
+function runningStatus(step: string): SessionStatus {
+  return { state: 'running', step, mapping: null, issues: [], failures: [], unmatchedSourceTables: [], error: null };
+}
 
 describe('MigrationService', () => {
   let service: MigrationService;
@@ -15,7 +20,10 @@ describe('MigrationService', () => {
     http = TestBed.inject(HttpTestingController);
   });
 
-  afterEach(() => http.verify());
+  afterEach(() => {
+    http.verify();
+    vi.useRealTimers();
+  });
 
   it('posts a connection test and returns the result', async () => {
     const promise = service.testConnection({ server: 'localhost', database: 'Demo' });
@@ -50,5 +58,68 @@ describe('MigrationService', () => {
 
     expect(service.hasBlocking()).toBe(true);
     expect(service.blockingCount()).toBe(1);
+  });
+
+  describe('pollUntilDone', () => {
+    it('polls while running, then resolves and stores the mapping once ready', async () => {
+      vi.useFakeTimers();
+      service.sessionId.set('sess-1');
+      const mapping: Mapping = {
+        name: 'Demo', model: 'test', sourceDatabase: 'S', sourceReference: '[S]', targetDatabase: 'T', tables: [],
+      };
+
+      const promise = service.pollUntilDone(1000);
+
+      http.expectOne('/api/analyse/sess-1').flush(runningStatus('Matching tables'));
+      await Promise.resolve();
+      expect(service.status()?.state).toBe('running');
+
+      await vi.advanceTimersByTimeAsync(1000);
+
+      http.expectOne('/api/analyse/sess-1').flush({
+        state: 'ready', step: null, mapping, issues: [], failures: [], unmatchedSourceTables: [], error: null,
+      });
+
+      const status = await promise;
+      expect(status.state).toBe('ready');
+      expect(service.mapping()).toEqual(mapping);
+      expect(service.status()?.state).toBe('ready');
+    });
+
+    it('polls while running, then resolves with the failure reason once failed', async () => {
+      vi.useFakeTimers();
+      service.sessionId.set('sess-2');
+
+      const promise = service.pollUntilDone(1000);
+
+      http.expectOne('/api/analyse/sess-2').flush(runningStatus('Validating'));
+      await vi.advanceTimersByTimeAsync(1000);
+
+      http.expectOne('/api/analyse/sess-2').flush({
+        state: 'failed', step: null, mapping: null, issues: [], failures: ['boom'],
+        unmatchedSourceTables: [], error: 'The source database is unreachable.',
+      });
+
+      const status = await promise;
+      expect(status.state).toBe('failed');
+      expect(status.error).toBe('The source database is unreachable.');
+      expect(service.status()?.state).toBe('failed');
+    });
+
+    it('rejects when a request fails mid-poll, instead of looping forever', async () => {
+      vi.useFakeTimers();
+      service.sessionId.set('sess-3');
+
+      const promise = service.pollUntilDone(1000);
+      // Prevent an unhandled-rejection warning while the assertion below awaits the rejection.
+      promise.catch(() => {});
+
+      http.expectOne('/api/analyse/sess-3').flush(runningStatus('Matching tables'));
+      await vi.advanceTimersByTimeAsync(1000);
+
+      http.expectOne('/api/analyse/sess-3').flush('Internal error', { status: 500, statusText: 'Server Error' });
+
+      await expect(promise).rejects.toBeInstanceOf(HttpErrorResponse);
+    });
   });
 });
