@@ -43,6 +43,22 @@ public sealed record ColumnMapResponse(List<ColumnProposal>? Columns, List<Unmap
     public List<UnmappedProposal> Unmapped { get; init; } = Unmapped ?? [];
 }
 
+/// <summary>One table pair's entry within a batched column-mapping response.</summary>
+public sealed record TableColumnMap(
+    [property: JsonRequired] string TargetTable,
+    List<ColumnProposal>? Columns,
+    List<UnmappedProposal>? Unmapped)
+{
+    public List<ColumnProposal> Columns { get; init; } = Columns ?? [];
+    public List<UnmappedProposal> Unmapped { get; init; } = Unmapped ?? [];
+}
+
+/// <summary>Response to a batched column-mapping request covering several table pairs at once.</summary>
+public sealed record BatchColumnMapResponse(List<TableColumnMap>? Tables)
+{
+    public List<TableColumnMap> Tables { get; init; } = Tables ?? [];
+}
+
 public static class AiJson
 {
     private static readonly JsonSerializerOptions Options = new()

@@ -15,4 +15,11 @@ public sealed class AiOptions
     public double ConfidenceThreshold { get; init; } = 0.75;
 
     public int TimeoutSeconds { get; init; } = 120;
+
+    /// <summary>
+    /// How many table pairs go into one column-mapping request. A value of 1 reproduces the
+    /// original one-call-per-table behaviour exactly — useful as a bail-out if batching ever
+    /// misbehaves against a particular provider. 0 or negative is treated as 1.
+    /// </summary>
+    public int ColumnBatchSize { get; init; } = 5;
 }

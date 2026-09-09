@@ -117,6 +117,32 @@ databases and nothing else.
 | `Ai:ApiKey` | *(empty)* | `NVIDIA_API_KEY` is preferred; never commit a key |
 | `Ai:ConfidenceThreshold` | `0.75` | At or above this, a proposal arrives pre-ticked in the review grid |
 | `Ai:TimeoutSeconds` | `120` | Per request, applied as a linked cancellation |
+| `Ai:ColumnBatchSize` | `5` | Table pairs mapped per column-mapping request. `1` reproduces one request per table pair |
+
+### How many requests a run makes, and the trade
+
+Analysis costs `1 + ceil(N / ColumnBatchSize)` requests for `N` matched table pairs: one to
+match tables, then one per batch of column mappings. At the default that is 2 requests for
+the 3-table demo and 11 for a 50-table schema, against 4 and 51 before batching.
+
+Batching buys far fewer requests — and so far fewer rate-limit refusals — at one real cost:
+**a provider failure now costs the whole batch rather than a single table.** The failure
+message names every table in the failed batch, so nothing disappears silently, and the other
+batches still complete. Set `ColumnBatchSize` to `1` to get per-table isolation back at the
+old request volume.
+
+### When the model returns nothing
+
+A run that reaches Review with no table pairs and a failure like *"Gave up on table matching"*
+means the provider refused or never answered — not that the tool failed. The two common causes:
+
+- **`429 Too Many Requests`** — the account is rate limited. Re-run; batching makes this much
+  less likely than it was.
+- **"the model provider timed out"** — the model took longer than `Ai:TimeoutSeconds` on a
+  single call. Raise it, or pick a faster model. Note this bites on the *first* call, before
+  batching applies, so batching alone will not fix a model that is simply slow — and a larger
+  `ColumnBatchSize` makes each request bigger, so lower it if a slow model starts timing out
+  on the column pass too.
 
 The API always binds `http://127.0.0.1:5199` — that is set in code, not configuration, and
 deliberately not overridable by `ASPNETCORE_URLS`. This process can reach two databases and
