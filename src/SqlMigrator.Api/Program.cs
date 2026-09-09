@@ -29,6 +29,12 @@ app.MapPost("/api/connections/test", async (ConnectionRequest request, Cancellat
 
         return Results.Ok(new ConnectionTestResponse(true, reader.GetString(0), reader.GetInt32(1), null));
     }
+    catch (ArgumentException ex)
+    {
+        // Rejected by validation before any connection was attempted. The message names the
+        // offending parameter only — never the value the caller sent.
+        return Results.BadRequest(new ConnectionTestResponse(false, null, 0, ex.Message));
+    }
     catch (SqlException ex)
     {
         // The message comes from the server and contains no credential, because none was sent.

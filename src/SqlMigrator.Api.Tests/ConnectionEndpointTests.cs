@@ -52,4 +52,18 @@ public class ConnectionEndpointTests : IClassFixture<WebApplicationFactory<Progr
         Assert.DoesNotContain("Integrated Security", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("TrustServerCertificate", body, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public async Task Rejects_a_server_value_that_attempts_key_injection_without_touching_the_database()
+    {
+        var response = await _client.PostAsJsonAsync("/api/connections/test",
+            new ConnectionRequest("localhost;Server=evil.host", "SqlMigratorDemo_Source"));
+
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+        var result = (await response.Content.ReadFromJsonAsync<ConnectionTestResponse>())!;
+
+        Assert.False(result.Ok);
+        Assert.NotNull(result.Error);
+        Assert.DoesNotContain("evil.host", result.Error);
+    }
 }

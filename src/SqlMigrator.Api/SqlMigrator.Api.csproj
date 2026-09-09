@@ -7,6 +7,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\SqlMigrator.Core\SqlMigrator.Core.csproj" />
     <ProjectReference Include="..\SqlMigrator.Ai\SqlMigrator.Ai.csproj" />
     <ProjectReference Include="..\SqlMigrator.Model\SqlMigrator.Model.csproj" />
