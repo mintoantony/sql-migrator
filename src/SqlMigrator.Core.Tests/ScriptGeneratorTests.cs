@@ -294,4 +294,91 @@ public class ScriptGeneratorTests
         Assert.Throws<ScriptGenerationException>(
             () => ScriptGenerator.Generate(mapping, schema, Options()));
     }
+
+    // --- Script header comments: the fifth injection (C2) ---------------------------------
+    // SourceDatabase, TargetDatabase and Model are free text — SourceDatabase/TargetDatabase
+    // can come straight off the request body or off a live server's database name, and Model
+    // off a language model's self-reported name — and used to be interpolated raw into "--"
+    // header comment lines. A "--" comment ends at the first CR or LF, so a value containing
+    // either one could close the comment and let the rest of its own text run as a live
+    // statement, above BEGIN TRANSACTION, before the script's own safety net even starts. The
+    // fix strips CR/LF via SqlComment.Sanitize; these tests assert on the emitted text that a
+    // payload can no longer start a new line, let alone one above BEGIN TRANSACTION.
+
+    private static void AssertNoLiveLineAboveTransaction(string sql)
+    {
+        var beginTransaction = sql.IndexOf("BEGIN TRANSACTION;", StringComparison.Ordinal);
+        Assert.True(beginTransaction > 0, "Script must contain BEGIN TRANSACTION;");
+
+        foreach (var line in sql[..beginTransaction].Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var trimmed = line.TrimEnd('\r');
+            Assert.True(
+                trimmed.Length == 0 || trimmed.StartsWith("--", StringComparison.Ordinal)
+                    || trimmed is "SET XACT_ABORT ON;",
+                $"Line above BEGIN TRANSACTION must be blank, a comment, or the XACT_ABORT setup — was: {trimmed}");
+        }
+    }
+
+    [Theory]
+    [InlineData("SqlMigratorDemo_Source\nDROP TABLE dbo.Invoices;--")]
+    [InlineData("SqlMigratorDemo_Source\r\nDROP TABLE dbo.Invoices;--")]
+    [InlineData("SqlMigratorDemo_Source\nDROP TABLE dbo.Invoices;--\n")]
+    public void A_newline_in_SourceDatabase_cannot_start_a_line_above_the_transaction(string payload)
+    {
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = new MigrationMapping(
+            "Injection", new DateTimeOffset(2026, 9, 9, 11, 14, 0, TimeSpan.Zero), "test-model",
+            payload, "[SourceDb]", "TestDb",
+            [new TableMapping(
+                "dbo.Src", "dbo.Tbl",
+                [new ColumnMapping("Col", RuleKind.Copy, "SrcCol", Origin.Ai, 0.99)],
+                [], Origin.Ai, 0.99, "test")]);
+
+        var sql = ScriptGenerator.Generate(mapping, schema, Options());
+
+        Assert.DoesNotContain("\nDROP TABLE", sql);
+        AssertNoLiveLineAboveTransaction(sql);
+    }
+
+    [Theory]
+    [InlineData("TestDb\nDROP TABLE dbo.Invoices;--")]
+    [InlineData("TestDb\r\nDROP TABLE dbo.Invoices;--")]
+    public void A_newline_in_TargetDatabase_cannot_start_a_line_above_the_transaction(string payload)
+    {
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = new MigrationMapping(
+            "Injection", new DateTimeOffset(2026, 9, 9, 11, 14, 0, TimeSpan.Zero), "test-model",
+            "SourceDb", "[SourceDb]", payload,
+            [new TableMapping(
+                "dbo.Src", "dbo.Tbl",
+                [new ColumnMapping("Col", RuleKind.Copy, "SrcCol", Origin.Ai, 0.99)],
+                [], Origin.Ai, 0.99, "test")]);
+
+        var sql = ScriptGenerator.Generate(mapping, schema, Options());
+
+        Assert.DoesNotContain("\nDROP TABLE", sql);
+        AssertNoLiveLineAboveTransaction(sql);
+    }
+
+    [Theory]
+    [InlineData("test-model\nDROP TABLE dbo.Invoices;--")]
+    [InlineData("test-model\r\nDROP TABLE dbo.Invoices;--")]
+    public void A_newline_in_Model_cannot_start_a_line_above_the_transaction(string payload)
+    {
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = new MigrationMapping(
+            "Injection", new DateTimeOffset(2026, 9, 9, 11, 14, 0, TimeSpan.Zero), payload,
+            "SourceDb", "[SourceDb]", "TestDb",
+            [new TableMapping(
+                "dbo.Src", "dbo.Tbl",
+                [new ColumnMapping("Col", RuleKind.Copy, "SrcCol", Origin.Ai, 0.99)],
+                [], Origin.Ai, 0.99, "test")]);
+
+        var sql = ScriptGenerator.Generate(mapping, schema, Options());
+
+        Assert.DoesNotContain("\nDROP TABLE", sql);
+        Assert.Contains("-- Mapping proposed by: test-modelDROP TABLE dbo.Invoices;--", sql);
+        AssertNoLiveLineAboveTransaction(sql);
+    }
 }

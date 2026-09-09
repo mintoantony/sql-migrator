@@ -46,10 +46,24 @@ public static class ScriptGenerator
         var byTarget = mapping.Tables.ToDictionary(t => t.TargetTable, StringComparer.OrdinalIgnoreCase);
         var sb = new StringBuilder();
 
-        sb.AppendLine($"-- Generated {options.GeneratedUtc.UtcDateTime:yyyy-MM-ddTHH:mmZ} from {options.MappingFileName} (sha256 {options.MappingSha256})");
-        sb.AppendLine($"-- Source: {options.SourceServer} . {mapping.SourceDatabase}");
-        sb.AppendLine($"-- Target: {options.TargetServer} . {mapping.TargetDatabase}");
-        if (mapping.Model is not null) sb.AppendLine($"-- Mapping proposed by: {mapping.Model}");
+        // Every value below is free text — from the request body, or a linked-server database
+        // name read off a live server — and lands in a "--" comment line. A "--" comment ends
+        // at the first CR or LF, so an un-sanitized value could close the comment early and let
+        // whatever follows run as a live statement in the header, above BEGIN TRANSACTION.
+        // SqlComment.Sanitize is the only thing between that and this text: route every value
+        // that reaches a comment line through it, not just the ones an attacker is likeliest
+        // to control.
+        var mappingFileName = SqlComment.Sanitize(options.MappingFileName);
+        var mappingSha256 = SqlComment.Sanitize(options.MappingSha256);
+        var sourceServer = SqlComment.Sanitize(options.SourceServer);
+        var targetServer = SqlComment.Sanitize(options.TargetServer);
+        var sourceDatabase = SqlComment.Sanitize(mapping.SourceDatabase);
+        var targetDatabase = SqlComment.Sanitize(mapping.TargetDatabase);
+
+        sb.AppendLine($"-- Generated {options.GeneratedUtc.UtcDateTime:yyyy-MM-ddTHH:mmZ} from {mappingFileName} (sha256 {mappingSha256})");
+        sb.AppendLine($"-- Source: {sourceServer} . {sourceDatabase}");
+        sb.AppendLine($"-- Target: {targetServer} . {targetDatabase}");
+        if (mapping.Model is not null) sb.AppendLine($"-- Mapping proposed by: {SqlComment.Sanitize(mapping.Model)}");
         sb.AppendLine("-- Review before running. This script inserts data.");
         sb.AppendLine();
         sb.AppendLine("SET XACT_ABORT ON;");

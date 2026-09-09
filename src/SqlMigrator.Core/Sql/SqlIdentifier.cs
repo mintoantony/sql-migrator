@@ -10,13 +10,28 @@ namespace SqlMigrator.Core.Sql;
 /// interpolated into command text. That makes this escaping the only thing between a
 /// caller-supplied name and arbitrary SQL, so it follows the T-SQL rule exactly: a ] inside
 /// a bracket-quoted identifier is escaped by doubling it.
+/// <para>
+/// Scope: this covers identifiers only. A value embedded inside a single-quoted string
+/// literal is a different emission context and must instead route through
+/// <see cref="SqlLiteral"/>; a value embedded inside a "--" comment line is a third emission
+/// context and must instead route through <see cref="SqlComment"/>. Each context has its own
+/// escaping rule and its own class — do not assume this one covers the other two.
+/// </para>
 /// </summary>
 public static partial class SqlIdentifier
 {
     // One or two bracket-quoted parts, e.g. [SomeDb] or [SRCLINK].[SomeDb]. A source
     // reference is not free text — spec §2.5 fixes its shape — so anything that is not
     // exactly this is refused before any SQL is built, rather than sanitised.
-    [GeneratedRegex(@"^\[[^\[\]]+\](\.\[[^\[\]]+\])?$", RegexOptions.None)]
+    //
+    // \A and \z (not ^ and $) anchor to the true start and end of the string. In .NET, $
+    // also matches immediately before a trailing '\n', so "[db]\n" would satisfy ^...$ even
+    // though it is not the shape this regex claims to enforce. Today that stray match is
+    // harmless only because QuoteIdentifier happens to Trim() its input — an incidental
+    // safety net, not a guarantee, and IsValidSourceReference is also called standalone by
+    // MappingValidator, which does no trimming at all. \A/\z close the gap directly instead
+    // of relying on that.
+    [GeneratedRegex(@"\A\[[^\[\]]+\](\.\[[^\[\]]+\])?\z", RegexOptions.None)]
     private static partial Regex ValidSourceReferenceRegex();
 
     /// <summary>
