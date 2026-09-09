@@ -30,6 +30,13 @@ public static class TestDatabases
         }
     }
 
+    /// <summary>Forces the next EnsureCreated to rebuild both databases from scratch.</summary>
+    public static void Reset()
+    {
+        lock (Gate) { _created = false; }
+        EnsureCreated();
+    }
+
     private static string Build(string database) =>
         $"Server={Server};Database={database};Integrated Security=True;TrustServerCertificate=True";
 
