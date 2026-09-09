@@ -33,10 +33,65 @@ describe('ReviewStep', () => {
     fixture.detectChanges();
   });
 
-  it('lists every mapped column of the selected table', () => {
-    const text = fixture.nativeElement.textContent;
-    expect(text).toContain('ClientId');
-    expect(text).toContain('FullName');
+  it('lists every mapped column, one aligned row each', () => {
+    const rows = fixture.nativeElement.querySelectorAll('table.grid tbody tr');
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain('ClientId');
+    expect(rows[1].textContent).toContain('FullName');
+  });
+
+  it('puts the table summary in the panel header, where the left-hand list used to be', () => {
+    const header = fixture.nativeElement.querySelector('mat-expansion-panel-header');
+    expect(header.textContent).toContain('dbo.Customer');
+    expect(header.textContent).toContain('dbo.Client');
+    expect(header.textContent).toContain('96%');
+    expect(header.textContent).toContain('Customers.');
+  });
+
+  it('edits the expression in a plain input that sits inside the cell', () => {
+    const input = fixture.nativeElement.querySelector('td.expression input') as HTMLInputElement;
+    expect(input.value).toBe('CustomerId');
+  });
+
+  it('shows a green tick with the model reason when a line has no issue', () => {
+    const status = fixture.componentInstance.lineStatus('dbo.Client', mapping.tables[0].columns[0]);
+    expect(status.tone).toBe('ok');
+    expect(status.icon).toBe('check_circle');
+    expect(status.message).toBe('Key.');
+
+    const button = fixture.nativeElement.querySelector('td.status button');
+    expect(button.classList).toContain('ok');
+    expect(button.textContent).toContain('check_circle');
+  });
+
+  it('shows a red error icon, the code and the message when a line has a blocking issue', () => {
+    service.issues.set([
+      { code: 'EXP002', severity: 'Blocking', message: 'Invalid column name', table: 'dbo.Client', column: 'FullName' },
+    ]);
+    fixture.detectChanges();
+
+    const status = fixture.componentInstance.lineStatus('dbo.Client', mapping.tables[0].columns[1]);
+    expect(status.tone).toBe('error');
+    expect(status.icon).toBe('error');
+    expect(status.title).toContain('EXP002');
+    expect(status.message).toBe('Invalid column name');
+
+    const buttons = fixture.nativeElement.querySelectorAll('td.status button');
+    expect(buttons[1].classList).toContain('error');
+    expect(buttons[1].getAttribute('aria-label')).toContain('Invalid column name');
+    // The header carries the count so a collapsed table still shows it needs attention.
+    expect(fixture.nativeElement.querySelector('mat-expansion-panel-header').textContent).toContain('1 blocking');
+  });
+
+  it('shows an amber warning icon for a warning', () => {
+    service.issues.set([
+      { code: 'TYP002', severity: 'Warning', message: 'nvarchar(201) into nvarchar(200)', table: 'dbo.Client', column: 'FullName' },
+    ]);
+    fixture.detectChanges();
+
+    const status = fixture.componentInstance.lineStatus('dbo.Client', mapping.tables[0].columns[1]);
+    expect(status.tone).toBe('warning');
+    expect(status.icon).toBe('warning');
   });
 
   it('shows unmapped target columns, because what was not mapped matters', () => {
