@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace SqlMigrator.Ai;
 
-/// <summary>Raised when a model response cannot be parsed into the shape we asked for.</summary>
+/// <summary>Raised when the model provider fails or its response cannot be parsed into the shape we asked for.</summary>
 public sealed class AiException : Exception
 {
     public AiException(string message) : base(message)
