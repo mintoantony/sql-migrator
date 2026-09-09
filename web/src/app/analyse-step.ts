@@ -35,7 +35,7 @@ export class AnalyseStep {
 
   async ngOnInit() {
     try {
-      const status = await this.service.pollUntilDone();
+      const status = await this.service.watchUntilDone();
       if (status.state === 'ready') this.finished.emit();
     } catch (err) {
       this.pollError.set(describeError(err));

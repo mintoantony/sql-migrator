@@ -79,7 +79,7 @@ app.MapPost("/api/analyse", (
         SourceReference = request.SourceReference
     });
 
-    // Fire and forget: the browser polls GET /api/analyse/{id} for progress. AnalysisRunner
+    // Fire and forget: the browser follows GET /api/analyse/{id}/events for progress. AnalysisRunner
     // catches everything it can throw and always publishes a terminal state, so this task is
     // never awaited or observed here. It is cancelled, though: the token belongs to the session,
     // and store.Start fires it the moment a newer analysis replaces this one, so an abandoned
@@ -96,11 +96,17 @@ app.MapGet("/api/analyse/{id}", (string id, SessionStore store, AiOptions aiOpti
 
     // State/Step/Mapping/Error come from one atomic snapshot — see Session.Result — so this
     // can never report "ready" with a null Mapping or a stale Step from a torn read.
-    var result = session.Result;
-    return Results.Ok(new SessionStatus(
-        result.State, result.Step, result.Mapping,
-        session.Issues.ToList(), session.Failures.ToList(), session.UnmatchedSourceTables.ToList(),
-        result.Error, aiOptions.ConfidenceThreshold));
+    return Results.Ok(AnalysisEvents.Snapshot(session, session.Result, aiOptions));
+});
+
+// One request per analysis: stays open, pushes each step and the final status, then ends.
+// This is what the browser uses; the one-shot GET above remains for scripts and tests.
+app.MapGet("/api/analyse/{id}/events", (string id, SessionStore store, AiOptions aiOptions, CancellationToken ct) =>
+{
+    var session = store.Get(id);
+    if (session is null) return Results.NotFound();
+
+    return TypedResults.ServerSentEvents(AnalysisEvents.Stream(session, aiOptions, ct));
 });
 
 app.MapPost("/api/expression/validate", async (

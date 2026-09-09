@@ -1,7 +1,7 @@
 import { TestBed } from '@angular/core/testing';
 import { HttpErrorResponse, provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
-import { MigrationService } from './migration.service';
+import { EVENT_SOURCE, MigrationService } from './migration.service';
 import { Mapping, SessionStatus } from './models';
 
 function runningStatus(step: string): SessionStatus {
@@ -26,13 +26,36 @@ const reviewMapping: Mapping = {
   }],
 };
 
+/** A scriptable stand-in for the browser's EventSource: tests push events and see whether it was closed. */
+class FakeEventSource {
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  closed = false;
+
+  constructor(readonly url: string) {}
+
+  close() { this.closed = true; }
+
+  push(status: SessionStatus) { this.onmessage?.({ data: JSON.stringify(status) } as MessageEvent); }
+  drop() { this.onerror?.(new Event('error')); }
+}
+
 describe('MigrationService', () => {
   let service: MigrationService;
   let http: HttpTestingController;
+  let opened: FakeEventSource[];
 
   beforeEach(() => {
+    opened = [];
     TestBed.configureTestingModule({
-      providers: [MigrationService, provideHttpClient(), provideHttpClientTesting()],
+      providers: [
+        MigrationService, provideHttpClient(), provideHttpClientTesting(),
+        { provide: EVENT_SOURCE, useValue: (url: string) => {
+          const source = new FakeEventSource(url);
+          opened.push(source);
+          return source as unknown as EventSource;
+        } },
+      ],
     });
     service = TestBed.inject(MigrationService);
     http = TestBed.inject(HttpTestingController);
@@ -78,23 +101,23 @@ describe('MigrationService', () => {
     expect(service.blockingCount()).toBe(1);
   });
 
-  describe('pollUntilDone', () => {
-    it('polls while running, then resolves and stores the mapping once ready', async () => {
-      vi.useFakeTimers();
+  describe('watchUntilDone', () => {
+    it('opens one event stream, tracks progress, then resolves and stores the mapping once ready', async () => {
       service.sessionId.set('sess-1');
       const mapping: Mapping = {
         name: 'Demo', model: 'test', sourceDatabase: 'S', sourceReference: '[S]', targetDatabase: 'T', tables: [],
       };
 
-      const promise = service.pollUntilDone(1000);
+      const promise = service.watchUntilDone();
 
-      http.expectOne('/api/analyse/sess-1').flush(runningStatus('Matching tables'));
-      await Promise.resolve();
-      expect(service.status()?.state).toBe('running');
+      expect(opened.map(s => s.url)).toEqual(['/api/analyse/sess-1/events']);
+      opened[0].push(runningStatus('Matching tables'));
+      expect(service.status()?.step).toBe('Matching tables');
+      opened[0].push(runningStatus('Validating expressions'));
+      expect(service.status()?.step).toBe('Validating expressions');
+      expect(opened[0].closed).toBe(false);
 
-      await vi.advanceTimersByTimeAsync(1000);
-
-      http.expectOne('/api/analyse/sess-1').flush({
+      opened[0].push({
         state: 'ready', step: null, mapping, issues: [], failures: [], unmatchedSourceTables: [], error: null,
         confidenceThreshold: 0.8,
       });
@@ -105,42 +128,43 @@ describe('MigrationService', () => {
       expect(service.status()?.state).toBe('ready');
       // The server-configured threshold, not a client-side default, drives the review grid.
       expect(service.confidenceThreshold()).toBe(0.8);
+      // Closed by the client on the terminal event, so the browser never reconnects to a finished run.
+      expect(opened[0].closed).toBe(true);
+      // No polling: the whole run cost the browser exactly one request.
+      expect(opened.length).toBe(1);
+      http.expectNone('/api/analyse/sess-1');
     });
 
-    it('polls while running, then resolves with the failure reason once failed', async () => {
-      vi.useFakeTimers();
+    it('resolves with the failure reason once failed', async () => {
       service.sessionId.set('sess-2');
 
-      const promise = service.pollUntilDone(1000);
+      const promise = service.watchUntilDone();
 
-      http.expectOne('/api/analyse/sess-2').flush(runningStatus('Validating'));
-      await vi.advanceTimersByTimeAsync(1000);
-
-      http.expectOne('/api/analyse/sess-2').flush({
+      opened[0].push(runningStatus('Validating'));
+      opened[0].push({
         state: 'failed', step: null, mapping: null, issues: [], failures: ['boom'],
-        unmatchedSourceTables: [], error: 'The source database is unreachable.',
+        unmatchedSourceTables: [], error: 'The source database is unreachable.', confidenceThreshold: 0.75,
       });
 
       const status = await promise;
       expect(status.state).toBe('failed');
       expect(status.error).toBe('The source database is unreachable.');
       expect(service.status()?.state).toBe('failed');
+      expect(opened[0].closed).toBe(true);
     });
 
-    it('rejects when a request fails mid-poll, instead of looping forever', async () => {
-      vi.useFakeTimers();
+    it('rejects when the stream drops, instead of waiting forever', async () => {
       service.sessionId.set('sess-3');
 
-      const promise = service.pollUntilDone(1000);
+      const promise = service.watchUntilDone();
       // Prevent an unhandled-rejection warning while the assertion below awaits the rejection.
       promise.catch(() => {});
 
-      http.expectOne('/api/analyse/sess-3').flush(runningStatus('Matching tables'));
-      await vi.advanceTimersByTimeAsync(1000);
+      opened[0].push(runningStatus('Matching tables'));
+      opened[0].drop();
 
-      http.expectOne('/api/analyse/sess-3').flush('Internal error', { status: 500, statusText: 'Server Error' });
-
-      await expect(promise).rejects.toBeInstanceOf(HttpErrorResponse);
+      await expect(promise).rejects.toThrow(/Lost the connection/);
+      expect(opened[0].closed).toBe(true);
     });
   });
 

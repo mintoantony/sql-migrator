@@ -174,6 +174,56 @@ public class AnalysisEndpointTests : IClassFixture<WebApplicationFactory<Program
         throw new TimeoutException($"Within 30 seconds, {otherwise}.");
     }
 
+    /// <summary>
+    /// The browser used to poll GET /api/analyse/{id} every half second, so a one-minute run put
+    /// well over a hundred requests in the network tab — easily mistaken for a hundred model
+    /// calls. The status is now pushed over one server-sent-events request that stays open until
+    /// the terminal state and then closes.
+    /// </summary>
+    [Fact]
+    public async Task Streams_progress_and_the_final_state_over_a_single_request()
+    {
+        var started = (await (await _client.PostAsJsonAsync("/api/analyse", Request()))
+            .Content.ReadFromJsonAsync<AnalyseStarted>())!;
+
+        using var response = await _client.GetAsync(
+            $"/api/analyse/{started.SessionId}/events", HttpCompletionOption.ResponseHeadersRead);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/event-stream", response.Content.Headers.ContentType!.MediaType);
+
+        // Completes only when the server ends the stream — which it must do on its own after
+        // the terminal state, or this test hangs and fails on its timeout.
+        var body = await response.Content.ReadAsStringAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        var events = ParseEvents(body);
+
+        Assert.NotEmpty(events);
+        Assert.Equal("ready", events[^1].State);
+        Assert.Equal(3, events[^1].Mapping!.Tables.Count);
+        Assert.All(events[..^1], e => Assert.Equal("running", e.State));
+        Assert.Contains(events, e => e.State == "running" && e.Step is not null);
+    }
+
+    [Fact]
+    public async Task The_event_stream_is_404_for_an_unknown_session()
+    {
+        var response = await _client.GetAsync("/api/analyse/nope/events");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    private static List<SessionStatus> ParseEvents(string body)
+    {
+        var options = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
+        return body.Replace("\r\n", "\n").Split("\n\n", StringSplitOptions.RemoveEmptyEntries)
+            .Select(block => string.Join("", block.Split('\n')
+                .Where(line => line.StartsWith("data:", StringComparison.Ordinal))
+                .Select(line => line["data:".Length..].TrimStart())))
+            .Where(data => data.Length > 0)
+            .Select(data => System.Text.Json.JsonSerializer.Deserialize<SessionStatus>(data, options)!)
+            .ToList();
+    }
+
     [Fact]
     public async Task Produces_a_validated_mapping_for_all_three_tables()
     {

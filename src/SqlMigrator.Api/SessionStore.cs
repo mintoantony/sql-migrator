@@ -87,6 +87,7 @@ public sealed class Session
 
     private readonly Lock _gate = new();
     private SessionResult _result = SessionResult.Running;
+    private TaskCompletionSource _changed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly CancellationTokenSource _run = new();
 
     /// <summary>
@@ -106,22 +107,58 @@ public sealed class Session
         get { lock (_gate) return _result; }
     }
 
+    /// <summary>
+    /// Completes as soon as <see cref="Result"/> differs from <paramref name="seen"/>, or with
+    /// the current (unchanged) result once <paramref name="keepAlive"/> has elapsed. This is what
+    /// lets the status be pushed to the browser over one open request instead of polled: a
+    /// waiter sleeps until a writer publishes, and the keep-alive gives the stream something to
+    /// send periodically so an idle connection is not mistaken for a dead one.
+    /// </summary>
+    public async Task<SessionResult> WaitForChangeAsync(
+        SessionResult seen, TimeSpan keepAlive, CancellationToken ct)
+    {
+        var deadline = Task.Delay(keepAlive, ct);
+        while (true)
+        {
+            Task changed;
+            lock (_gate)
+            {
+                if (_result != seen) return _result;
+                changed = _changed.Task;
+            }
+
+            if (await Task.WhenAny(changed, deadline) == deadline)
+            {
+                await deadline; // observes the cancellation, if that is why it completed
+                lock (_gate) return _result;
+            }
+        }
+    }
+
     /// <summary>Updates the progress message shown while the run is still "running".</summary>
     public void SetStep(string? step)
     {
-        lock (_gate) _result = _result with { Step = step };
+        lock (_gate) Publish(_result with { Step = step });
     }
 
     /// <summary>Publishes State="ready" and the mapping together, in one step.</summary>
-    public void Complete(MappingDto mapping)
-    {
-        lock (_gate) _result = new SessionResult("ready", null, mapping, null);
-    }
+    public void Complete(MappingDto mapping) =>
+        Publish(new SessionResult("ready", null, mapping, null));
 
     /// <summary>Publishes State="failed" and the error message together, in one step.</summary>
-    public void Fail(string error)
+    public void Fail(string error) =>
+        Publish(new SessionResult("failed", null, null, error));
+
+    /// <summary>Swaps the snapshot and wakes every <see cref="WaitForChangeAsync"/> waiter, under the gate.</summary>
+    private void Publish(SessionResult result)
     {
-        lock (_gate) _result = new SessionResult("failed", null, null, error);
+        lock (_gate)
+        {
+            _result = result;
+            var waiters = _changed;
+            _changed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            waiters.SetResult();
+        }
     }
 }
 

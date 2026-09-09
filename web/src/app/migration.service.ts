@@ -1,4 +1,4 @@
-import { Injectable, computed, inject, signal } from '@angular/core';
+import { Injectable, InjectionToken, computed, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
 import {
@@ -6,9 +6,16 @@ import {
   Mapping, SaveMappingResponse, SessionStatus, TableMapping, ValidateExpressionResponse,
 } from './models';
 
+/** How the service opens a server-sent-events connection; replaced with a fake in tests. */
+export const EVENT_SOURCE = new InjectionToken<(url: string) => EventSource>('EVENT_SOURCE', {
+  providedIn: 'root',
+  factory: () => (url: string) => new EventSource(url),
+});
+
 @Injectable({ providedIn: 'root' })
 export class MigrationService {
   private readonly http = inject(HttpClient);
+  private readonly openEvents = inject(EVENT_SOURCE);
 
   readonly sessionId = signal<string | null>(null);
   readonly status = signal<SessionStatus | null>(null);
@@ -87,23 +94,39 @@ export class MigrationService {
     this.sessionId.set(started.sessionId);
   }
 
-  /** Polls until the analysis finishes. The API holds one session, so there is nothing to cancel. */
-  async pollUntilDone(intervalMs = 500): Promise<SessionStatus> {
+  /**
+   * Follows the analysis over one server-sent-events request until it finishes. This replaced a
+   * half-second poll of GET /api/analyse/{id}: a one-minute run put over a hundred requests in
+   * the network tab, which reads as a hundred calls to the model when the model sees two or
+   * three. Now the browser opens exactly one request per analysis and the server pushes each
+   * step and the final state down it.
+   */
+  watchUntilDone(): Promise<SessionStatus> {
     const id = this.sessionId();
-    if (!id) throw new Error('No analysis has been started.');
+    if (!id) return Promise.reject(new Error('No analysis has been started.'));
 
-    for (;;) {
-      const status = await firstValueFrom(this.http.get<SessionStatus>(`/api/analyse/${id}`));
-      this.status.set(status);
-      this.confidenceThreshold.set(status.confidenceThreshold);
+    return new Promise<SessionStatus>((resolve, reject) => {
+      const source = this.openEvents(`/api/analyse/${id}/events`);
 
-      if (status.state !== 'running') {
+      source.onmessage = event => {
+        const status = JSON.parse(event.data as string) as SessionStatus;
+        this.status.set(status);
+        this.confidenceThreshold.set(status.confidenceThreshold);
+        if (status.state === 'running') return;
+
+        // Close before the server does: an EventSource treats a server-side close as a dropped
+        // connection and reconnects, which would start a second stream for a finished run.
+        source.close();
         this.mapping.set(status.mapping);
         this.issues.set(status.issues);
-        return status;
-      }
-      await new Promise(resolve => setTimeout(resolve, intervalMs));
-    }
+        resolve(status);
+      };
+
+      source.onerror = () => {
+        source.close();
+        reject(new Error('Lost the connection to the analysis. Is the API still running?'));
+      };
+    });
   }
 
   validateExpression(

@@ -64,7 +64,8 @@ never point `SQLMIGRATOR_TEST_SQL` at a server holding anything you care about.
    - different instance: `[LinkedServerName].[SqlMigratorDemo_Source]`
 3. **Analyse** — reads both schemas, asks the model to match tables, then asks it for an
    expression per target column, then proves every expression against the real database.
-   Expect roughly a minute; progress shows which table pair is being mapped.
+   Expect roughly a minute; progress is streamed over a single request and shows which
+   table pair is being mapped.
 4. **Review** — the grid shows each target column with its rule, the proposed expression,
    a confidence, and any issue. Proposals at or above the confidence threshold
    (`Ai:ConfidenceThreshold`, default `0.75`) arrive ticked. **Unticking a row drops it**:
@@ -125,6 +126,11 @@ databases and nothing else.
 Analysis costs `1 + ceil(N / ColumnBatchSize)` requests for `N` matched table pairs: one to
 match tables, then one per batch of column mappings. At the default that is 2 requests for
 the 3-table demo and 11 for a 50-table schema, against 4 and 51 before batching.
+
+Those are the only calls that leave your machine. The browser, for its part, opens **one**
+request per analysis: `GET /api/analyse/{id}/events` is a server-sent-events stream that stays
+open, carries each progress step and the final result, and then closes. If you are watching
+the network tab, that single long-lived request is the analysis; nothing polls.
 
 That count is per analysis. The API keeps one analysis at a time, and **starting a new one
 cancels the previous run** the moment it is superseded, so pressing Analyse again, or coming
