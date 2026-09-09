@@ -70,6 +70,23 @@ import { describeError } from './http-error';
       <p>{{ service.status()!.unmatchedSourceTables.join(', ') }}</p>
     }
 
+    <!--
+      The analysis records why each table failed — a provider timeout, a 429, a response it
+      could not parse — and this used to render none of it. A run that hit its rate limit
+      therefore arrived here as an empty grid with no explanation, which reads as "the tool
+      is broken" rather than "the model provider refused, try again". These are the whole
+      reason the grid is empty; they belong on the screen.
+    -->
+    @if (service.status()?.failures?.length) {
+      <h4>The model could not be reached for some tables</h4>
+      <ul class="failures">
+        @for (failure of service.status()!.failures; track $index) {
+          <li>{{ failure }}</li>
+        }
+      </ul>
+      <p class="hint">These tables were left unmapped. Re-running the analysis usually picks them up.</p>
+    }
+
     @if (editError(); as message) {
       <p class="error">{{ message }}</p>
     }
@@ -87,6 +104,9 @@ import { describeError } from './http-error';
     .selected { background: var(--mat-sys-surface-variant); }
     .verdict { font-weight: 600; }
     .error { color: var(--mat-sys-error); }
+    .failures { margin: 0 0 0.5rem; padding-left: 1.25rem; color: var(--mat-sys-error); }
+    .failures li { margin-bottom: 0.25rem; }
+    .hint { margin-top: 0; opacity: 0.8; }
   `,
 })
 export class ReviewStep {

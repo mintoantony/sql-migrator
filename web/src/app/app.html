@@ -1,6 +1,14 @@
 <h1>SQL Migrator</h1>
 
-<mat-stepper [selectedIndex]="step()" linear>
+<!--
+  selectionChange is not optional. [selectedIndex] is a one-way binding, but the Material
+  stepper's headers are clickable in their own right: clicking one moves the stepper's
+  internal selection while step() stays where it was, so every @if (step() === n) guard
+  below stops matching and the panel renders empty — with the header showing a step you
+  are not on and no way back. Feeding the change back into step() keeps the two in step.
+  `linear` still blocks a forward jump to a step whose work has not happened yet.
+-->
+<mat-stepper [selectedIndex]="step()" (selectionChange)="goTo($event.selectedIndex)" linear>
   <mat-step label="Connections">
     <app-connections-step (started)="next()" />
   </mat-step>
@@ -19,7 +27,7 @@
 
   <mat-step label="Script">
     @if (step() === 3) {
-      <app-script-step />
+      <app-script-step (back)="goTo(2)" />
     }
   </mat-step>
 </mat-stepper>
