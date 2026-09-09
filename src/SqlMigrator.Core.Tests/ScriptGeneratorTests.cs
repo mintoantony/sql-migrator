@@ -1,0 +1,229 @@
+using SqlMigrator.Core.Generation;
+using SqlMigrator.Core.Mapping;
+using SqlMigrator.Core.Schema;
+
+namespace SqlMigrator.Core.Tests;
+
+[Collection("sql")]
+public class ScriptGeneratorTests
+{
+    private static ScriptOptions Options() => new(
+        SourceServer: "localhost",
+        TargetServer: "localhost",
+        GeneratedUtc: new DateTimeOffset(2026, 9, 9, 11, 14, 0, TimeSpan.Zero),
+        MappingFileName: "mappings/demo.xml",
+        MappingSha256: "3f9a0000");
+
+    private static MigrationMapping DemoMigrationMapping() => new(
+        "Demo", new DateTimeOffset(2026, 9, 9, 11, 14, 0, TimeSpan.Zero), "test-model",
+        TestDatabases.SourceDb, $"[{TestDatabases.SourceDb}]", TestDatabases.TargetDb,
+        [DemoMapping.OrderToOrder(), DemoMapping.CustomerToClient(), DemoMapping.OrderLineToOrderLine()]);
+
+    [Fact]
+    public async Task Emits_parents_before_children_regardless_of_mapping_order()
+    {
+        TestDatabases.EnsureCreated();
+        var target = await SchemaReader.ReadAsync(TestDatabases.TargetConnectionString);
+
+        var sql = ScriptGenerator.Generate(DemoMigrationMapping(), target, Options());
+
+        var client = sql.IndexOf("INSERT INTO [dbo].[Client]", StringComparison.Ordinal);
+        var order = sql.IndexOf("INSERT INTO [dbo].[Order]", StringComparison.Ordinal);
+        var line = sql.IndexOf("INSERT INTO [dbo].[OrderLine]", StringComparison.Ordinal);
+
+        Assert.True(client < order, "Client must be inserted before Order");
+        Assert.True(order < line, "Order must be inserted before OrderLine");
+    }
+
+    [Fact]
+    public async Task Wraps_identity_tables_and_guards_emptiness()
+    {
+        TestDatabases.EnsureCreated();
+        var target = await SchemaReader.ReadAsync(TestDatabases.TargetConnectionString);
+
+        var sql = ScriptGenerator.Generate(DemoMigrationMapping(), target, Options());
+
+        Assert.Contains("SET XACT_ABORT ON;", sql);
+        Assert.Contains("BEGIN TRANSACTION;", sql);
+        Assert.Contains("COMMIT;", sql);
+        Assert.Contains("IF EXISTS (SELECT 1 FROM [dbo].[Client])", sql);
+        Assert.Contains("SET IDENTITY_INSERT [dbo].[Client] ON;", sql);
+        Assert.Contains("SET IDENTITY_INSERT [dbo].[Client] OFF;", sql);
+
+        // Order and OrderLine are identity tables too — the guard and IDENTITY_INSERT wrap
+        // must not be a Client-only accident.
+        Assert.Contains("IF EXISTS (SELECT 1 FROM [dbo].[Order])", sql);
+        Assert.Contains("SET IDENTITY_INSERT [dbo].[Order] ON;", sql);
+        Assert.Contains("SET IDENTITY_INSERT [dbo].[Order] OFF;", sql);
+
+        Assert.Contains("IF EXISTS (SELECT 1 FROM [dbo].[OrderLine])", sql);
+        Assert.Contains("SET IDENTITY_INSERT [dbo].[OrderLine] ON;", sql);
+        Assert.Contains("SET IDENTITY_INSERT [dbo].[OrderLine] OFF;", sql);
+    }
+
+    [Fact]
+    public async Task Leaves_identity_insert_off_on_the_failure_path_too()
+    {
+        // IDENTITY_INSERT is session-level state that XACT_ABORT's rollback does not reset, so
+        // the OFF for an identity table must appear on both the success and the failure path.
+        TestDatabases.EnsureCreated();
+        var target = await SchemaReader.ReadAsync(TestDatabases.TargetConnectionString);
+
+        var sql = ScriptGenerator.Generate(DemoMigrationMapping(), target, Options());
+
+        Assert.Contains("BEGIN TRY", sql);
+        Assert.Contains("BEGIN CATCH", sql);
+        // Exactly two OFFs per identity table: one on the TRY path, one on the CATCH path.
+        Assert.Equal(2, CountOccurrences(sql, "SET IDENTITY_INSERT [dbo].[Client] OFF;"));
+        // The original error must still surface — not swallowed by the cleanup.
+        Assert.Contains("THROW;", sql);
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = haystack.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+        return count;
+    }
+
+    [Fact]
+    public async Task Emits_expressions_and_the_source_reference_verbatim()
+    {
+        TestDatabases.EnsureCreated();
+        var target = await SchemaReader.ReadAsync(TestDatabases.TargetConnectionString);
+
+        var sql = ScriptGenerator.Generate(DemoMigrationMapping(), target, Options());
+
+        Assert.Contains("CONCAT(FirstName, ' ', LastName)", sql);
+        Assert.Contains($"FROM [{TestDatabases.SourceDb}].[dbo].[Customer]", sql);
+        Assert.Contains("-- Source: localhost . SqlMigratorDemo_Source", sql);
+        Assert.Contains("3f9a0000", sql);
+    }
+
+    [Fact]
+    public async Task Never_emits_a_credential()
+    {
+        TestDatabases.EnsureCreated();
+        var target = await SchemaReader.ReadAsync(TestDatabases.TargetConnectionString);
+
+        var sql = ScriptGenerator.Generate(DemoMigrationMapping(), target, Options());
+
+        Assert.DoesNotContain("Password", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Integrated Security", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Refuses_to_generate_when_the_foreign_keys_form_a_cycle()
+    {
+        TestDatabases.EnsureCreated();
+        var target = await SchemaReader.ReadAsync(TestDatabases.TargetConnectionString);
+        var cyclic = new DbSchema(target.DatabaseName, target.Tables,
+        [
+            new ForeignKeyInfo("FK_Client_Order", "dbo", "Client", "dbo", "Order"),
+            new ForeignKeyInfo("FK_Order_Client", "dbo", "Order", "dbo", "Client")
+        ]);
+
+        var ex = Assert.Throws<ScriptGenerationException>(
+            () => ScriptGenerator.Generate(DemoMigrationMapping(), cyclic, Options()));
+
+        Assert.Contains("cycle", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // --- Injection-hardening tests -------------------------------------------------------
+    // These build the schema and mapping in memory, so they need no database and run fast.
+    // Table/column names come from a schema; expressions come from a language model. Both
+    // flow unchecked into the emitted script, so every identifier and every value embedded in
+    // a string literal must be escaped, however hostile the input.
+
+    private static DbSchema SingleTableSchema(string schemaName, string tableName, string columnName, bool identity) =>
+        new(
+            "TestDb",
+            [
+                new TableInfo(
+                    schemaName,
+                    tableName,
+                    [new ColumnInfo(columnName, "int", 0, 0, 0, IsNullable: false, IsIdentity: identity, HasDefault: false, OrdinalPosition: 1)],
+                    [columnName])
+            ],
+            []);
+
+    private static MigrationMapping SingleTableMapping(string sourceTable, string targetTable, string sourceColumn, string targetColumn) =>
+        new(
+            "Injection", new DateTimeOffset(2026, 9, 9, 11, 14, 0, TimeSpan.Zero), "test-model",
+            "SourceDb", "[SourceDb]", "TestDb",
+            [new TableMapping(
+                sourceTable, targetTable,
+                [new ColumnMapping(targetColumn, RuleKind.Copy, sourceColumn, Origin.Ai, 0.99)],
+                [], Origin.Ai, 0.99, "test")]);
+
+    [Fact]
+    public void Escapes_an_embedded_closing_bracket_in_every_identifier_site()
+    {
+        var schema = SingleTableSchema("dbo", "Ord]er", "Col]A", identity: true);
+        var mapping = SingleTableMapping("dbo.Src]Tbl", "dbo.Ord]er", "SrcCol", "Col]A");
+
+        var sql = ScriptGenerator.Generate(mapping, schema, Options());
+
+        // A lone ']' would close the bracketed identifier early; T-SQL escapes it by doubling.
+        Assert.Contains("IF EXISTS (SELECT 1 FROM [dbo].[Ord]]er])", sql);
+        Assert.Contains("INSERT INTO [dbo].[Ord]]er] ([Col]]A])", sql);
+        Assert.Contains("FROM [SourceDb].[dbo].[Src]]Tbl];", sql);
+        Assert.Contains("SET IDENTITY_INSERT [dbo].[Ord]]er] ON;", sql);
+        Assert.Contains("SET IDENTITY_INSERT [dbo].[Ord]]er] OFF;", sql);
+
+        // The naive (unescaped) forms must never appear — that's the injection this guards against.
+        Assert.DoesNotContain("[dbo].[Ord]er]", sql);
+        Assert.DoesNotContain("[Col]A]", sql);
+    }
+
+    [Fact]
+    public void Escapes_an_embedded_single_quote_in_string_literals()
+    {
+        var schema = SingleTableSchema("dbo", "O'Brien", "Col", identity: false);
+        var mapping = SingleTableMapping("dbo.Src", "dbo.O'Brien", "SrcCol", "Col");
+
+        var sql = ScriptGenerator.Generate(mapping, schema, Options());
+
+        // A lone ''' would close the string literal early; T-SQL escapes it by doubling.
+        Assert.Contains("THROW 50001, 'Target table dbo.O''Brien is not empty", sql);
+        Assert.Contains("PRINT CONCAT('dbo.O''Brien: ', @@ROWCOUNT, ' rows');", sql);
+        Assert.DoesNotContain("Target table dbo.O'Brien is not empty", sql);
+    }
+
+    [Fact]
+    public void Comment_markers_and_newlines_stay_inertly_inside_the_brackets_that_contain_them()
+    {
+        var schema = SingleTableSchema("dbo", "Foo--Bar", "Baz\nQux", identity: false);
+        var mapping = SingleTableMapping("dbo.Src", "dbo.Foo--Bar", "SrcCol", "Baz\nQux");
+
+        var sql = ScriptGenerator.Generate(mapping, schema, Options());
+
+        // '--' and a raw newline are ordinary characters inside a bracket-quoted identifier;
+        // they only become dangerous if the quoting is broken, so a single intact bracket pair
+        // around each name is the assertion that matters.
+        Assert.Contains("[dbo].[Foo--Bar]", sql);
+        Assert.Contains("[Baz\nQux]", sql);
+    }
+
+    [Fact]
+    public void Escapes_the_classic_bracket_breakout_payload()
+    {
+        // The exact shape proven exploitable against a sibling generator: an interior ']'
+        // followed by a second statement and a line comment to swallow the rest of the batch.
+        const string payload = "Customer]; SELECT 1 AS Pwn --";
+        var schema = SingleTableSchema("dbo", payload, "Col", identity: false);
+        var mapping = SingleTableMapping("dbo.Src", $"dbo.{payload}", "SrcCol", "Col");
+
+        var sql = ScriptGenerator.Generate(mapping, schema, Options());
+
+        Assert.Contains($"[dbo].[{payload.Replace("]", "]]")}]", sql);
+        // The naive (Trim-only) quoting this replaces would close the bracket right after
+        // "Customer", leaving "; SELECT 1 AS Pwn --]" as live, uncommented script text.
+        Assert.DoesNotContain("[dbo].[Customer]; SELECT 1 AS Pwn --]", sql);
+    }
+}
