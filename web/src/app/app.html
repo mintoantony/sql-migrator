@@ -7,7 +7,7 @@
 
   <mat-step label="Analyse">
     @if (step() === 1) {
-      <app-analyse-step (finished)="next()" />
+      <app-analyse-step (finished)="next()" (back)="goTo(0)" />
     }
   </mat-step>
 

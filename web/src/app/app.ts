@@ -14,4 +14,5 @@ import { ScriptStep } from './script-step';
 export class App {
   readonly step = signal(0);
   next() { this.step.update(s => s + 1); }
+  goTo(index: number) { this.step.set(index); }
 }
