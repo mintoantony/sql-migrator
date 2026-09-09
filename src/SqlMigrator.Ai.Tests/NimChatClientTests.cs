@@ -85,4 +85,36 @@ public class NimChatClientTests
 
         await Assert.ThrowsAsync<AiException>(() => client.CompleteJsonAsync("s", "u"));
     }
+
+    [Fact]
+    public async Task Configured_timeout_cancels_the_request()
+    {
+        // A near-zero timeout combined with a handler that blocks until cancelled
+        // proves the timeout actually reaches the request, without waiting out a
+        // real timeout period.
+        using var handler = new BlockingHandler();
+        using var http = new HttpClient(handler);
+        var options = new AiOptions
+        {
+            BaseUrl = "https://example.invalid/v1",
+            ApiKey = "nvapi-secret-value",
+            Model = "test/model",
+            TimeoutSeconds = 0
+        };
+        var client = new NimChatClient(http, options);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.CompleteJsonAsync("s", "u"));
+    }
+
+    /// <summary>Never completes on its own; only returns once its cancellation token fires.</summary>
+    private sealed class BlockingHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("unreachable: Task.Delay should have thrown on cancellation.");
+        }
+    }
 }

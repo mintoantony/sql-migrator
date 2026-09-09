@@ -13,7 +13,14 @@ public sealed class NimChatClient(HttpClient http, AiOptions options) : IChatCli
     public async Task<string> CompleteJsonAsync(
         string systemPrompt, string userPrompt, CancellationToken ct = default)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, $"{options.BaseUrl.TrimEnd('/')}/chat/completions")
+        // The HttpClient is injected and may be shared, so we can't set its Timeout
+        // (that throws once the client has sent a request, and would affect other
+        // callers anyway). Enforce options.TimeoutSeconds per-request instead, linked
+        // to the caller's token so either one still cancels the request.
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(options.TimeoutSeconds));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"{options.BaseUrl.TrimEnd('/')}/chat/completions")
         {
             Content = JsonContent.Create(new
             {
@@ -29,8 +36,8 @@ public sealed class NimChatClient(HttpClient http, AiOptions options) : IChatCli
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
 
-        using var response = await http.SendAsync(request, ct);
-        var body = await response.Content.ReadAsStringAsync(ct);
+        using var response = await http.SendAsync(request, linkedCts.Token);
+        var body = await response.Content.ReadAsStringAsync(linkedCts.Token);
 
         if (!response.IsSuccessStatusCode)
         {
