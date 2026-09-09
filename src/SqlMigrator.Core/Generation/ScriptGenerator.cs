@@ -57,32 +57,73 @@ public static class ScriptGenerator
             ?? throw new ScriptGenerationException($"Target table {table.TargetTable} is not in the target schema.");
 
         var quotedTarget = Quote(table.TargetTable);
+        var escapedTargetName = EscapeLiteral(table.TargetTable);
         var usesIdentity = targetTable.Columns.Any(c => c.IsIdentity && table.Columns.Any(m =>
             string.Equals(m.TargetColumn, c.Name, StringComparison.OrdinalIgnoreCase)));
 
         sb.AppendLine(CultureInfo.InvariantCulture,
             $"IF EXISTS (SELECT 1 FROM {quotedTarget})");
         sb.AppendLine(CultureInfo.InvariantCulture,
-            $"    THROW 50001, 'Target table {table.TargetTable} is not empty. Keys are preserved, so a rerun would collide.', 1;");
+            $"    THROW 50001, 'Target table {escapedTargetName} is not empty. Keys are preserved, so a rerun would collide.', 1;");
         sb.AppendLine();
 
-        if (usesIdentity) sb.AppendLine($"SET IDENTITY_INSERT {quotedTarget} ON;");
+        var columnList = string.Join(", ", table.Columns.Select(c => QuoteIdentifier(c.TargetColumn)));
+        var insertLines = new[]
+            {
+                $"INSERT INTO {quotedTarget} ({columnList})",
+                "SELECT " + string.Join(",\n       ", table.Columns.Select(c => c.Expression)),
+                $"FROM {sourceReference}.{Quote(table.SourceTable)};",
+            };
 
-        var columnList = string.Join(", ", table.Columns.Select(c => $"[{c.TargetColumn}]"));
-        sb.AppendLine($"INSERT INTO {quotedTarget} ({columnList})");
-        sb.AppendLine("SELECT " + string.Join(",\n       ", table.Columns.Select(c => c.Expression)));
-        sb.AppendLine($"FROM {sourceReference}.{Quote(table.SourceTable)};");
+        if (usesIdentity)
+        {
+            // IDENTITY_INSERT is session-level state, not transactional: SET XACT_ABORT rolls
+            // the data back on failure but does not reset this flag. Guarantee it is turned OFF
+            // on both paths, then rethrow the original error unchanged so the caller still sees it.
+            sb.AppendLine("BEGIN TRY");
+            sb.AppendLine($"    SET IDENTITY_INSERT {quotedTarget} ON;");
+            foreach (var line in insertLines) sb.AppendLine("    " + line);
+            sb.AppendLine($"    SET IDENTITY_INSERT {quotedTarget} OFF;");
+            sb.AppendLine("END TRY");
+            sb.AppendLine("BEGIN CATCH");
+            sb.AppendLine($"    SET IDENTITY_INSERT {quotedTarget} OFF;");
+            sb.AppendLine("    THROW;");
+            sb.AppendLine("END CATCH;");
+        }
+        else
+        {
+            foreach (var line in insertLines) sb.AppendLine(line);
+        }
 
-        if (usesIdentity) sb.AppendLine($"SET IDENTITY_INSERT {quotedTarget} OFF;");
-
-        sb.AppendLine($"PRINT CONCAT('{table.TargetTable}: ', @@ROWCOUNT, ' rows');");
+        sb.AppendLine($"PRINT CONCAT('{escapedTargetName}: ', @@ROWCOUNT, ' rows');");
     }
 
     private static string Quote(string fullName)
     {
         var parts = fullName.Split('.', 2);
         return parts.Length == 2
-            ? $"[{parts[0].Trim('[', ']')}].[{parts[1].Trim('[', ']')}]"
-            : $"[dbo].[{fullName.Trim('[', ']')}]";
+            ? $"{QuoteIdentifier(parts[0])}.{QuoteIdentifier(parts[1])}"
+            : $"{QuoteIdentifier("dbo")}.{QuoteIdentifier(fullName)}";
     }
+
+    /// <summary>
+    /// Quotes a single T-SQL identifier. Strips at most one matched pair of surrounding
+    /// brackets (so a caller-supplied "[Name]" is not double-bracketed), then escapes every
+    /// remaining ']' by doubling it, per the T-SQL rule for bracket-quoted identifiers. This is
+    /// the only place identifier quoting happens; every identifier the generator emits must
+    /// route through here (directly, or via <see cref="Quote"/>).
+    /// </summary>
+    private static string QuoteIdentifier(string identifier)
+    {
+        var name = identifier;
+        if (name.Length >= 2 && name[0] == '[' && name[^1] == ']')
+        {
+            name = name[1..^1];
+        }
+
+        return $"[{name.Replace("]", "]]")}]";
+    }
+
+    /// <summary>Escapes a value for embedding inside a single-quoted T-SQL string literal.</summary>
+    private static string EscapeLiteral(string value) => value.Replace("'", "''");
 }

@@ -2,6 +2,7 @@ using SqlMigrator.Core.Mapping;
 
 namespace SqlMigrator.Core.Tests;
 
+/// <summary>The correct mapping for the demo fixtures. Shared by validator, generator and end-to-end tests.</summary>
 public static class DemoMapping
 {
     public static TableMapping CustomerToClient() => new(
