@@ -46,6 +46,7 @@ public sealed record SessionResult(string State, string? Step, MappingDto? Mappi
 
 /// <summary>
 /// One analysis at a time, in memory. A restart loses it, which is correct for a local tool.
+/// Starting a new one cancels the run behind the old one — see <see cref="RunCancellation"/>.
 ///
 /// A background analysis mutates a session's <see cref="Issues"/>/<see cref="Failures"/>/
 /// <see cref="UnmatchedSourceTables"/> lists while a status endpoint concurrently reads them via
@@ -86,6 +87,18 @@ public sealed class Session
 
     private readonly Lock _gate = new();
     private SessionResult _result = SessionResult.Running;
+    private readonly CancellationTokenSource _run = new();
+
+    /// <summary>
+    /// Fires when this session is superseded. The analysis behind a session runs detached from
+    /// the request that started it, so this token is the only thing that can stop it — and it
+    /// must be stopped: an abandoned run kept calling the model provider to completion for a
+    /// result no poll could ever read, so every press of Analyse stacked a further full set of
+    /// model requests on top of the last.
+    /// </summary>
+    public CancellationToken RunCancellation => _run.Token;
+
+    internal void CancelRun() => _run.Cancel();
 
     /// <summary>An atomic snapshot of (State, Step, Mapping, Error) — never a torn read.</summary>
     public SessionResult Result
@@ -117,9 +130,16 @@ public sealed class SessionStore
     private readonly Lock _gate = new();
     private Session? _current;
 
+    /// <summary>Makes <paramref name="session"/> current and cancels the run of the one it replaces.</summary>
     public Session Start(Session session)
     {
-        lock (_gate) { _current = session; return session; }
+        Session? superseded;
+        lock (_gate) { superseded = _current; _current = session; }
+
+        // Outside the lock: cancellation runs continuations synchronously, and none of them
+        // should ever execute while the store's gate is held.
+        superseded?.CancelRun();
+        return session;
     }
 
     public Session? Get(string id)

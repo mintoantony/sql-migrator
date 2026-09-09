@@ -22,7 +22,9 @@ builder.Services.AddSingleton(_ => new AiOptions
     ApiKey = Environment.GetEnvironmentVariable("NVIDIA_API_KEY")
              ?? builder.Configuration["Ai:ApiKey"] ?? "",
     Model = builder.Configuration["Ai:Model"] ?? "",
-    ConfidenceThreshold = double.TryParse(builder.Configuration["Ai:ConfidenceThreshold"], out var t) ? t : 0.75
+    ConfidenceThreshold = double.TryParse(builder.Configuration["Ai:ConfidenceThreshold"], out var t) ? t : 0.75,
+    TimeoutSeconds = int.TryParse(builder.Configuration["Ai:TimeoutSeconds"], out var timeout) ? timeout : 120,
+    ColumnBatchSize = int.TryParse(builder.Configuration["Ai:ColumnBatchSize"], out var batch) ? batch : 5
 });
 
 builder.Services.AddSingleton<IChatClient>(sp => new NimChatClient(
@@ -79,8 +81,10 @@ app.MapPost("/api/analyse", (
 
     // Fire and forget: the browser polls GET /api/analyse/{id} for progress. AnalysisRunner
     // catches everything it can throw and always publishes a terminal state, so this task is
-    // never awaited or observed here.
-    _ = Task.Run(() => AnalysisRunner.RunAsync(session, chatClient, aiOptions, CancellationToken.None));
+    // never awaited or observed here. It is cancelled, though: the token belongs to the session,
+    // and store.Start fires it the moment a newer analysis replaces this one, so an abandoned
+    // run stops calling the model instead of finishing for nobody.
+    _ = Task.Run(() => AnalysisRunner.RunAsync(session, chatClient, aiOptions, session.RunCancellation));
 
     return Results.Ok(new AnalyseStarted(session.Id));
 });

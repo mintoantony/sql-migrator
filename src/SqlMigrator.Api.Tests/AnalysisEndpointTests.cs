@@ -85,6 +85,28 @@ public sealed class ScriptedChatClient : IChatClient
         : $$"""{"columns":[{{OrderColumns}}]}""";
 }
 
+/// <summary>
+/// Stands in for a slow model: every call blocks until its cancellation token fires, and the
+/// tokens it was handed are recorded so a test can see whether a run was actually cancelled.
+/// </summary>
+public sealed class BlockingChatClient : IChatClient
+{
+    private readonly List<CancellationToken> _tokens = [];
+    private readonly Lock _gate = new();
+
+    public IReadOnlyList<CancellationToken> Tokens
+    {
+        get { lock (_gate) return [.. _tokens]; }
+    }
+
+    public async Task<string> CompleteJsonAsync(string systemPrompt, string userPrompt, CancellationToken ct = default)
+    {
+        lock (_gate) _tokens.Add(ct);
+        await Task.Delay(Timeout.Infinite, ct);
+        return "{}";
+    }
+}
+
 [Collection("api-sql")]
 public class AnalysisEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 {
@@ -115,6 +137,41 @@ public class AnalysisEndpointTests : IClassFixture<WebApplicationFactory<Program
             await Task.Delay(250);
         }
         throw new TimeoutException("Analysis did not finish within 30 seconds.");
+    }
+
+    /// <summary>
+    /// The API log showed five model calls in flight at once, which a single sequential run can
+    /// never produce: every POST /api/analyse launched a run that nothing ever stopped, and each
+    /// abandoned run kept calling the provider until it finished on its own. Starting a new
+    /// analysis must cancel the previous run's model call.
+    /// </summary>
+    [Fact]
+    public async Task A_new_analysis_cancels_the_model_call_of_the_one_it_supersedes()
+    {
+        var chat = new BlockingChatClient();
+        using var factory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(b => b.ConfigureServices(s => s.AddSingleton<IChatClient>(chat)));
+        var client = factory.CreateClient();
+
+        await client.PostAsJsonAsync("/api/analyse", Request());
+        await WaitUntil(() => chat.Tokens.Count == 1, "the first run never reached the model");
+        Assert.False(chat.Tokens[0].IsCancellationRequested);
+
+        await client.PostAsJsonAsync("/api/analyse", Request());
+
+        await WaitUntil(() => chat.Tokens[0].IsCancellationRequested, "the first run's model call was never cancelled");
+        await WaitUntil(() => chat.Tokens.Count == 2, "the second run never reached the model");
+        Assert.False(chat.Tokens[1].IsCancellationRequested);
+    }
+
+    private static async Task WaitUntil(Func<bool> condition, string otherwise)
+    {
+        for (var attempt = 0; attempt < 120; attempt++)
+        {
+            if (condition()) return;
+            await Task.Delay(250);
+        }
+        throw new TimeoutException($"Within 30 seconds, {otherwise}.");
     }
 
     [Fact]

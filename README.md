@@ -126,6 +126,12 @@ Analysis costs `1 + ceil(N / ColumnBatchSize)` requests for `N` matched table pa
 match tables, then one per batch of column mappings. At the default that is 2 requests for
 the 3-table demo and 11 for a 50-table schema, against 4 and 51 before batching.
 
+That count is per analysis. The API keeps one analysis at a time, and **starting a new one
+cancels the previous run** the moment it is superseded, so pressing Analyse again, or coming
+back from a failed run and retrying, never leaves an abandoned run calling the model in the
+background. The API's console log is the ground truth for what actually went out: every
+outgoing model call is logged as `Start processing HTTP request POST …/chat/completions`.
+
 Batching buys far fewer requests — and so far fewer rate-limit refusals — at one real cost:
 **a provider failure now costs the whole batch rather than a single table.** The failure
 message names every table in the failed batch, so nothing disappears silently, and the other

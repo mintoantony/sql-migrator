@@ -49,6 +49,12 @@ public static class AnalysisRunner
             // published to the session for a human to review.
             session.Complete(DtoMapper.ToDto(proposal.Mapping));
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Superseded by a newer analysis. Nothing can poll this session any more, but the
+            // state still has to reach a terminal value.
+            session.Fail("Cancelled: a newer analysis replaced this one.");
+        }
         catch (Exception ex)
         {
             session.Fail(ex.Message);

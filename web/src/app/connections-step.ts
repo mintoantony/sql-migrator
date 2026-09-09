@@ -37,7 +37,7 @@ import { describeError } from './http-error';
       <mat-hint>Same instance: [DatabaseName]. Different instance: [LinkedServer].[DatabaseName].</mat-hint>
     </mat-form-field>
 
-    <button mat-flat-button [disabled]="!bothTested()" (click)="start()">Analyse</button>
+    <button mat-flat-button [disabled]="!bothTested() || starting()" (click)="start()">Analyse</button>
     @if (startError(); as message) {
       <p class="error">{{ message }}</p>
     }
@@ -62,6 +62,9 @@ export class ConnectionsStep {
   });
   private readonly results = signal<Record<string, ConnectionTestResponse | undefined>>({});
   readonly startError = signal<string | null>(null);
+
+  /** Each POST /api/analyse starts a run and cancels the last one; a double-click must not send two. */
+  readonly starting = signal(false);
 
   server = (side: string) => this.connections()[side].server;
   database = (side: string) => this.connections()[side].database;
@@ -91,6 +94,8 @@ export class ConnectionsStep {
   bothTested = () => this.results()['source']?.ok === true && this.results()['target']?.ok === true;
 
   async start() {
+    if (this.starting()) return;
+    this.starting.set(true);
     this.startError.set(null);
     try {
       const { source, target } = this.connections();
@@ -98,6 +103,8 @@ export class ConnectionsStep {
       this.started.emit();
     } catch (err) {
       this.startError.set(describeError(err));
+    } finally {
+      this.starting.set(false);
     }
   }
 }
