@@ -88,9 +88,10 @@ Two other things you are likely to see:
 
 - **`SRC001` warnings** for source tables the model matched to nothing. They are warnings,
   not errors — a partial migration is a legitimate outcome.
-- **A `429 Too Many Requests` failure** on one or two tables if your NIM tier is rate
-  limited. The run continues and records the failure against that table only; a provider
-  problem on one table costs that table, not the migration. Re-run to pick them up.
+- **A `429 Too Many Requests` failure** if your NIM tier is rate limited. The run continues
+  and records which tables were lost; a provider problem costs that batch of tables, not the
+  migration. Re-run to pick them up. See *How many requests a run makes* below for the
+  batching trade behind that.
 
 ## Testing
 
