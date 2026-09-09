@@ -1,0 +1,32 @@
+<migration name="Demo" generated="2026-09-09T11:14:00.0000000Z">
+  <source database="SqlMigratorDemo_Source" reference="[SqlMigratorDemo_Source]" />
+  <target database="SqlMigratorDemo_Target" />
+  <table source="dbo.Customer" target="dbo.Client" origin="ai" confidence="0.96">
+    <reason>Both hold one row per customer.</reason>
+    <column target="ClientId" rule="copy" expression="CustomerId" origin="ai" confidence="0.99" />
+    <column target="FullName" rule="concat" expression="CONCAT(FirstName, ' ', LastName)" origin="ai" confidence="0.95" />
+    <column target="ShortName" rule="truncate" expression="LEFT(LastName, 20)" origin="ai" confidence="0.9" />
+    <column target="EmailAddress" rule="copy" expression="Email" origin="ai" confidence="0.98" />
+    <column target="EmailDomain" rule="split" expression="SUBSTRING(Email, CHARINDEX('@', Email) + 1, 100)" origin="ai" confidence="0.8" />
+    <column target="Summary" rule="truncate" expression="LEFT(Description, 100)" origin="ai" confidence="0.85" />
+    <column target="Active" rule="case" expression="CAST(CASE WHEN IsActive = 1 THEN 1 ELSE 0 END AS bit)" origin="ai" confidence="0.9" />
+    <column target="CreatedUtc" rule="copy" expression="CreatedUtc" origin="ai" confidence="0.99" />
+    <column target="MigratedUtc" rule="constant" expression="SYSUTCDATETIME()" origin="human" />
+    <unmapped target="Notes" reason="No corresponding source column; target column is nullable." />
+  </table>
+  <table source="dbo.Order" target="dbo.Order" origin="ai" confidence="0.98">
+    <reason>Same table name and shape.</reason>
+    <column target="OrderId" rule="copy" expression="OrderId" origin="ai" confidence="0.99" />
+    <column target="ClientId" rule="copy" expression="CustomerId" origin="ai" confidence="0.9" />
+    <column target="OrderDate" rule="copy" expression="OrderDate" origin="ai" confidence="0.99" />
+    <column target="Total" rule="copy" expression="Total" origin="ai" confidence="0.99" />
+  </table>
+  <table source="dbo.OrderLine" target="dbo.OrderLine" origin="ai" confidence="0.97">
+    <reason>Renamed columns only.</reason>
+    <column target="OrderLineId" rule="copy" expression="OrderLineId" origin="ai" confidence="0.99" />
+    <column target="OrderId" rule="copy" expression="OrderId" origin="ai" confidence="0.99" />
+    <column target="ProductName" rule="copy" expression="Product" origin="ai" confidence="0.92" />
+    <column target="Quantity" rule="copy" expression="Qty" origin="ai" confidence="0.92" />
+    <column target="UnitPrice" rule="copy" expression="UnitPrice" origin="ai" confidence="0.99" />
+  </table>
+</migration>
