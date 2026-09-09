@@ -36,25 +36,37 @@ public sealed class SynchronizedList<T>
 }
 
 /// <summary>
+/// The State/Step/Mapping/Error quartet, published as one immutable value so a reader can
+/// never observe it torn — see the note on <see cref="Session.Result"/>.
+/// </summary>
+public sealed record SessionResult(string State, string? Step, MappingDto? Mapping, string? Error)
+{
+    public static readonly SessionResult Running = new("running", null, null, null);
+}
+
+/// <summary>
 /// One analysis at a time, in memory. A restart loses it, which is correct for a local tool.
 ///
-/// A future background analysis mutates a session's <see cref="Issues"/>/<see cref="Failures"/>/
+/// A background analysis mutates a session's <see cref="Issues"/>/<see cref="Failures"/>/
 /// <see cref="UnmatchedSourceTables"/> lists while a status endpoint concurrently reads them via
 /// <see cref="SessionStore.Get"/>, holding no lock of its own. Those three fields are therefore
 /// <see cref="SynchronizedList{T}"/>, not a plain <see cref="List{T}"/>: appends and reads are
 /// internally synchronized, so it is safe for <see cref="SessionStore.Get"/> to keep handing out
-/// the live session rather than a deep copy. The scalar fields (<see cref="State"/>,
-/// <see cref="Step"/>, <see cref="Error"/>, <see cref="Mapping"/>, schemas) are plain reference
-/// types reassigned as a whole, never mutated in place, and .NET guarantees reference
-/// assignment is atomic — so no single one of them can be read half-written.
+/// the live session rather than a deep copy.
 ///
-/// That is narrower than it sounds, and the difference matters. Atomic per field does NOT
-/// mean consistent across fields: nothing ties <see cref="State"/> to <see cref="Mapping"/>,
-/// so once a background writer exists a reader can observe the PAIR torn — State already
-/// "ready" while Mapping is still null. Today no such writer exists, which is the only
-/// reason this is currently safe. The task that introduces the background analysis must
-/// publish State and its payload together under one lock, or swap in a single immutable
-/// result object, rather than assigning the two fields separately.
+/// <see cref="State"/>, <see cref="Step"/>, <see cref="Mapping"/> and <see cref="Error"/> are a
+/// different story: atomic per field does NOT mean consistent across fields. If they were plain
+/// properties assigned independently, a reader could observe the PAIR torn — State already
+/// "ready" while Mapping is still null — the instant a background writer exists. So they are not
+/// separate properties. They live together in one <see cref="SessionResult"/>, replaced as a
+/// single reference under <see cref="_gate"/> by <see cref="Complete"/>/<see cref="Fail"/>/
+/// <see cref="SetStep"/>, and read back as a single atomic snapshot via <see cref="Result"/>.
+/// A reader always sees a value that some writer actually published, never a mix of two.
+///
+/// <see cref="SourceSchema"/> and <see cref="TargetSchema"/> remain plain reference-typed
+/// properties: they are written only internally by the single background run for this session
+/// (never read back through the status endpoint), so plain atomic reference assignment is
+/// sufficient for them.
 /// </summary>
 public sealed class Session
 {
@@ -65,16 +77,39 @@ public sealed class Session
     public required string TargetServer { get; init; }
     public required string SourceReference { get; init; }
 
-    public string State { get; set; } = "running";
-    public string? Step { get; set; }
-    public string? Error { get; set; }
-
     public DbSchema? SourceSchema { get; set; }
     public DbSchema? TargetSchema { get; set; }
-    public MappingDto? Mapping { get; set; }
+
     public SynchronizedList<IssueDto> Issues { get; } = new();
     public SynchronizedList<string> Failures { get; } = new();
     public SynchronizedList<string> UnmatchedSourceTables { get; } = new();
+
+    private readonly Lock _gate = new();
+    private SessionResult _result = SessionResult.Running;
+
+    /// <summary>An atomic snapshot of (State, Step, Mapping, Error) — never a torn read.</summary>
+    public SessionResult Result
+    {
+        get { lock (_gate) return _result; }
+    }
+
+    /// <summary>Updates the progress message shown while the run is still "running".</summary>
+    public void SetStep(string? step)
+    {
+        lock (_gate) _result = _result with { Step = step };
+    }
+
+    /// <summary>Publishes State="ready" and the mapping together, in one step.</summary>
+    public void Complete(MappingDto mapping)
+    {
+        lock (_gate) _result = new SessionResult("ready", null, mapping, null);
+    }
+
+    /// <summary>Publishes State="failed" and the error message together, in one step.</summary>
+    public void Fail(string error)
+    {
+        lock (_gate) _result = new SessionResult("failed", null, null, error);
+    }
 }
 
 public sealed class SessionStore
