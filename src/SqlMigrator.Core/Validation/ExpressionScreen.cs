@@ -26,9 +26,11 @@ public static class ExpressionScreen
         if (string.IsNullOrWhiteSpace(expression))
             return ScreenResult.Fail("Expression is empty.");
 
-        var outsideLiterals = StripStringLiterals(expression, out var unterminated);
-        if (unterminated)
+        var outsideLiterals = StripLiteralsAndIdentifiers(expression, out var unternatedStringLiteral, out var unterminatedIdentifier);
+        if (unternatedStringLiteral)
             return ScreenResult.Fail("Expression has an unterminated string literal.");
+        if (unterminatedIdentifier)
+            return ScreenResult.Fail("Expression has an unterminated bracketed identifier.");
 
         if (outsideLiterals.Contains(';'))
             return ScreenResult.Fail("Expression contains a statement terminator (';').");
@@ -54,43 +56,70 @@ public static class ExpressionScreen
         return ScreenResult.Pass;
     }
 
-    /// <summary>Replaces the body of every '...' literal with spaces, preserving offsets.</summary>
-    private static string StripStringLiterals(string expression, out bool unterminated)
+    /// <summary>Replaces the body of every '...' literal and [...] identifier with spaces, preserving offsets.</summary>
+    private static string StripLiteralsAndIdentifiers(string expression, out bool unterminatedStringLiteral, out bool unterminatedIdentifier)
     {
         var builder = new StringBuilder(expression.Length);
-        var inLiteral = false;
+        var inStringLiteral = false;
+        var inBracketedIdentifier = false;
 
         for (var i = 0; i < expression.Length; i++)
         {
             var c = expression[i];
-            if (c == '\'')
+
+            if (c == '\'' && !inBracketedIdentifier)
             {
-                // '' inside a literal is an escaped quote, not a close.
-                if (inLiteral && i + 1 < expression.Length && expression[i + 1] == '\'')
+                // '' inside a string literal is an escaped quote, not a close.
+                if (inStringLiteral && i + 1 < expression.Length && expression[i + 1] == '\'')
                 {
                     builder.Append("  ");
                     i++;
                     continue;
                 }
-                inLiteral = !inLiteral;
+                inStringLiteral = !inStringLiteral;
                 builder.Append(' ');
                 continue;
             }
-            builder.Append(inLiteral ? ' ' : c);
+
+            if (c == '[' && !inStringLiteral)
+            {
+                inBracketedIdentifier = true;
+                builder.Append(' ');
+                continue;
+            }
+
+            if (c == ']' && inBracketedIdentifier && !inStringLiteral)
+            {
+                // ]] inside a bracketed identifier is an escaped bracket, not a close.
+                if (i + 1 < expression.Length && expression[i + 1] == ']')
+                {
+                    builder.Append("  ");
+                    i++;
+                    continue;
+                }
+                inBracketedIdentifier = false;
+                builder.Append(' ');
+                continue;
+            }
+
+            builder.Append(inStringLiteral || inBracketedIdentifier ? ' ' : c);
         }
 
-        unterminated = inLiteral;
+        unterminatedStringLiteral = inStringLiteral;
+        unterminatedIdentifier = inBracketedIdentifier;
         return builder.ToString();
     }
+
+    private static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c is '_' or '@' or '#' or '$';
 
     private static bool ContainsWord(string haystack, string word)
     {
         var index = haystack.IndexOf(word, StringComparison.OrdinalIgnoreCase);
         while (index >= 0)
         {
-            var before = index == 0 || !char.IsLetterOrDigit(haystack[index - 1]);
+            var before = index == 0 || !IsIdentifierChar(haystack[index - 1]);
             var afterIndex = index + word.Length;
-            var after = afterIndex >= haystack.Length || !char.IsLetterOrDigit(haystack[afterIndex]);
+            var after = afterIndex >= haystack.Length || !IsIdentifierChar(haystack[afterIndex]);
             if (before && after) return true;
             index = haystack.IndexOf(word, index + 1, StringComparison.OrdinalIgnoreCase);
         }

@@ -40,4 +40,44 @@ public class ExpressionScreenTests
         Assert.False(result.Ok);
         Assert.Contains("parenthes", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Theory]
+    [InlineData("LAST_UPDATE")]
+    [InlineData("UPDATE_FLAG")]
+    [InlineData("@EXEC_TIME")]
+    [InlineData("[Update]")]
+    [InlineData("[Delete]")]
+    [InlineData("[weird;name]")]
+    [InlineData("LEFT([Last Name], 20)")]
+    public void Accepts_expressions_with_keywords_in_identifiers_or_bracketed_names(string expression) =>
+        Assert.True(ExpressionScreen.Screen(expression).Ok);
+
+    [Theory]
+    [InlineData("UPDATE", "UPDATE")]
+    [InlineData("EXEC sp_who", "EXEC")]
+    public void Still_rejects_bare_forbidden_keywords(string expression, string expectedKeyword)
+    {
+        var result = ExpressionScreen.Screen(expression);
+
+        Assert.False(result.Ok);
+        Assert.Contains(expectedKeyword, result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Rejects_unterminated_bracketed_identifier()
+    {
+        var result = ExpressionScreen.Screen("[Name");
+
+        Assert.False(result.Ok);
+        Assert.Contains("bracketed identifier", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Rejects_semicolon_outside_brackets()
+    {
+        var result = ExpressionScreen.Screen("1; DROP TABLE dbo.Customer");
+
+        Assert.False(result.Ok);
+        Assert.Contains("terminator", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
 }
