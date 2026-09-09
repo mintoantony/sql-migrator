@@ -129,8 +129,7 @@ export class ReviewStep {
 
   /** Editing an expression marks the line as human-authored and re-validates it against the source. */
   async edit(table: TableMapping, column: ColumnMapping, expression: string) {
-    column.expression = expression;
-    column.origin = 'human';
+    this.applyEdit(table.targetTable, column.targetColumn, expression);
     this.editError.set(null);
 
     try {
@@ -142,6 +141,31 @@ export class ReviewStep {
       this.service.issues.set([...others, ...result.issues]);
     } catch (err) {
       this.editError.set(describeError(err));
+    }
+  }
+
+  /** Replaces the edited column immutably so the `mapping` signal's identity changes on every edit. */
+  private applyEdit(targetTable: string, targetColumn: string, expression: string) {
+    let updatedTable: TableMapping | undefined;
+
+    this.service.mapping.update(mapping => {
+      if (!mapping) return mapping;
+      return {
+        ...mapping,
+        tables: mapping.tables.map(t => {
+          if (t.targetTable !== targetTable) return t;
+          updatedTable = {
+            ...t,
+            columns: t.columns.map(c =>
+              c.targetColumn !== targetColumn ? c : { ...c, expression, origin: 'human' as const }),
+          };
+          return updatedTable;
+        }),
+      };
+    });
+
+    if (updatedTable && this.selected()?.targetTable === targetTable) {
+      this.selected.set(updatedTable);
     }
   }
 
