@@ -1,3 +1,4 @@
+using SqlMigrator.Core.Sql;
 using SqlMigrator.Model.Mapping;
 using SqlMigrator.Model.Schema;
 
@@ -9,6 +10,20 @@ public sealed class MappingValidator(DbSchema source, DbSchema target, IExpressi
         MigrationMapping mapping, CancellationToken ct = default)
     {
         var issues = new List<Issue>();
+
+        // Reject an invalid source reference at the earliest possible point — validation
+        // time, before a human is ever shown a "this mapping is fine" result — not just at
+        // script-generation time. It is not free text (spec §2.5): one or two bracket-quoted
+        // parts, e.g. [Database] or [LinkedServer].[Database].
+        if (!SqlIdentifier.IsValidSourceReference(mapping.SourceReference))
+        {
+            issues.Add(new Issue("REF001", Severity.Blocking,
+                $"Source reference '{mapping.SourceReference}' must be one or two bracket-quoted parts, " +
+                "e.g. [Database] or [LinkedServer].[Database].",
+                mapping.SourceDatabase));
+        }
+
+        issues.AddRange(DuplicateTargetTables(mapping));
 
         foreach (var table in mapping.Tables)
         {
@@ -43,6 +58,19 @@ public sealed class MappingValidator(DbSchema source, DbSchema target, IExpressi
         issues.AddRange(UnmatchedSourceTables(mapping));
         return issues;
     }
+
+    // The spec's global constraint is one source table per target table. Nothing else
+    // enforces this: it passes MAP002/MAP003 (which only check table/column existence) and
+    // would otherwise reach ScriptGenerator's ToDictionary(t => t.TargetTable, ...) — and
+    // TableOrder's before it — where a repeated key throws a plain, unhandled ArgumentException.
+    private static IEnumerable<Issue> DuplicateTargetTables(MigrationMapping mapping) =>
+        mapping.Tables
+            .GroupBy(t => t.TargetTable, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1)
+            .Select(g => new Issue("MAP004", Severity.Blocking,
+                $"Target table {g.Key} is mapped from {g.Count()} different source tables; " +
+                "each target table may have only one source table.",
+                g.Key));
 
     private static IEnumerable<Issue> DuplicateTargets(TableMapping table) =>
         table.Columns

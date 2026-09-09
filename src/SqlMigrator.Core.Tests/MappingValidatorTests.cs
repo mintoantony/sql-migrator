@@ -106,6 +106,67 @@ public class MappingValidatorTests
         Assert.Contains(issues, i => i.Code == "SRC001" && i.Severity == Severity.Warning && i.Table == "dbo.Order");
     }
 
+    [Theory]
+    [InlineData("[X]; DROP TABLE dbo.Invoices --]")]
+    [InlineData("O'Brien'; DROP TABLE dbo.Invoices --")]
+    [InlineData("[SqlMigratorDemo_Source]; DROP TABLE dbo.Invoices --")]
+    [InlineData("SqlMigratorDemo_Source")]
+    public async Task Reports_a_blocking_issue_for_an_invalid_source_reference(string sourceReference)
+    {
+        var (source, target, compiler) = await Context();
+        var mapping = new MigrationMapping(
+            "T", DateTimeOffset.UnixEpoch, null,
+            TestDatabases.SourceDb, sourceReference, TestDatabases.TargetDb,
+            [new TableMapping("dbo.Customer", "dbo.Client",
+                [new ColumnMapping("ClientId", RuleKind.Copy, "CustomerId", Origin.Ai)],
+                [], Origin.Ai, 1.0, null)]);
+
+        var issues = await new MappingValidator(source, target, compiler).ValidateAsync(mapping);
+
+        Assert.Contains(issues, i => i.Code == "REF001" && i.Severity == Severity.Blocking);
+        Assert.True(issues.HasBlocking());
+    }
+
+    [Theory]
+    [InlineData("[SqlMigratorDemo_Source]")]
+    [InlineData("[LINKEDSRV].[SqlMigratorDemo_Source]")]
+    public async Task Accepts_legitimate_one_and_two_part_source_references(string sourceReference)
+    {
+        var (source, target, compiler) = await Context();
+        var mapping = new MigrationMapping(
+            "T", DateTimeOffset.UnixEpoch, null,
+            TestDatabases.SourceDb, sourceReference, TestDatabases.TargetDb,
+            [new TableMapping("dbo.Customer", "dbo.Client",
+                [new ColumnMapping("ClientId", RuleKind.Copy, "CustomerId", Origin.Ai)],
+                [], Origin.Ai, 1.0, null)]);
+
+        var issues = await new MappingValidator(source, target, compiler).ValidateAsync(mapping);
+
+        Assert.DoesNotContain(issues, i => i.Code == "REF001");
+    }
+
+    [Fact]
+    public async Task Reports_a_blocking_issue_for_two_tables_mapped_to_the_same_target()
+    {
+        var (source, target, compiler) = await Context();
+        var mapping = new MigrationMapping(
+            "T", DateTimeOffset.UnixEpoch, null,
+            TestDatabases.SourceDb, $"[{TestDatabases.SourceDb}]", TestDatabases.TargetDb,
+            [
+                new TableMapping("dbo.Customer", "dbo.Client",
+                    [new ColumnMapping("ClientId", RuleKind.Copy, "CustomerId", Origin.Ai)],
+                    [], Origin.Ai, 1.0, null),
+                new TableMapping("dbo.Order", "dbo.Client",
+                    [new ColumnMapping("ClientId", RuleKind.Copy, "OrderId", Origin.Ai)],
+                    [], Origin.Ai, 1.0, null)
+            ]);
+
+        var issues = await new MappingValidator(source, target, compiler).ValidateAsync(mapping);
+
+        Assert.Contains(issues, i => i.Code == "MAP004" && i.Severity == Severity.Blocking);
+        Assert.True(issues.HasBlocking());
+    }
+
     [Fact]
     public async Task A_fully_correct_mapping_produces_no_blocking_issues()
     {

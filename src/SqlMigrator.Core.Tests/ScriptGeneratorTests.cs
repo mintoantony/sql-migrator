@@ -93,14 +93,18 @@ public class ScriptGeneratorTests
     }
 
     [Fact]
-    public async Task Emits_expressions_and_the_source_reference_verbatim()
+    public async Task Emits_expressions_verbatim_and_a_validated_source_reference()
     {
+        // "Verbatim" applies to the expression only. The source reference is not passed
+        // through untouched — it is validated and re-quoted by SqlIdentifier.QuoteSourceReference
+        // (see the Source_reference_* tests below) — this well-formed, already-bracketed value
+        // just happens to re-quote to the same text.
         TestDatabases.EnsureCreated();
         var target = await SchemaReader.ReadAsync(TestDatabases.TargetConnectionString);
 
         var sql = ScriptGenerator.Generate(DemoMigrationMapping(), target, Options());
 
-        Assert.Contains("CONCAT(FirstName, ' ', LastName)", sql);
+        Assert.Contains("LEFT(CONCAT(FirstName, ' ', LastName), 200)", sql);
         Assert.Contains($"FROM [{TestDatabases.SourceDb}].[dbo].[Customer]", sql);
         Assert.Contains("-- Source: localhost . SqlMigratorDemo_Source", sql);
         Assert.Contains("3f9a0000", sql);
@@ -153,10 +157,12 @@ public class ScriptGeneratorTests
             ],
             []);
 
-    private static MigrationMapping SingleTableMapping(string sourceTable, string targetTable, string sourceColumn, string targetColumn) =>
+    private static MigrationMapping SingleTableMapping(
+        string sourceTable, string targetTable, string sourceColumn, string targetColumn,
+        string sourceReference = "[SourceDb]") =>
         new(
             "Injection", new DateTimeOffset(2026, 9, 9, 11, 14, 0, TimeSpan.Zero), "test-model",
-            "SourceDb", "[SourceDb]", "TestDb",
+            "SourceDb", sourceReference, "TestDb",
             [new TableMapping(
                 sourceTable, targetTable,
                 [new ColumnMapping(targetColumn, RuleKind.Copy, sourceColumn, Origin.Ai, 0.99)],
@@ -226,5 +232,66 @@ public class ScriptGeneratorTests
         // The naive (Trim-only) quoting this replaces would close the bracket right after
         // "Customer", leaving "; SELECT 1 AS Pwn --]" as live, uncommented script text.
         Assert.DoesNotContain("[dbo].[Customer]; SELECT 1 AS Pwn --]", sql);
+    }
+
+    // --- SourceReference: the fourth injection --------------------------------------------
+    // Unlike a table/column identifier, SourceReference is not free text — spec §2.5 fixes
+    // its shape as one or two bracket-quoted parts (a same-instance database, or
+    // [LinkedServer].[Database]). It used to be interpolated straight into the emitted FROM
+    // clause with no quoting, escaping or validation at any hop from the browser: the Angular
+    // UI auto-fills it from the source database name, so a database literally named
+    // "X]; DROP TABLE dbo.Invoices --" produced live DDL in a script the tool had just
+    // certified as validated. The fix rejects anything that is not exactly the legitimate
+    // shape, rather than trying to sanitise it.
+
+    [Theory]
+    [InlineData("[SqlMigratorDemo_Source]")]
+    [InlineData("[LINKEDSRV].[SqlMigratorDemo_Source]")]
+    public void Legitimate_source_reference_forms_are_emitted_quoted(string sourceReference)
+    {
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = SingleTableMapping("dbo.Src", "dbo.Tbl", "SrcCol", "Col", sourceReference);
+
+        var sql = ScriptGenerator.Generate(mapping, schema, Options());
+
+        Assert.Contains($"FROM {sourceReference}.[dbo].[Src];", sql);
+    }
+
+    [Fact]
+    public void SourceReference_containing_a_closing_bracket_is_refused_before_any_sql_is_built()
+    {
+        // The exact C1 payload: an interior ']' followed by a second statement, closed with a
+        // trailing ']' so it still looks superficially well-formed.
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = SingleTableMapping("dbo.Src", "dbo.Tbl", "SrcCol", "Col",
+            sourceReference: "[X]; DROP TABLE dbo.Invoices --]");
+
+        var ex = Assert.Throws<ScriptGenerationException>(
+            () => ScriptGenerator.Generate(mapping, schema, Options()));
+        Assert.Contains("source reference", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SourceReference_containing_an_unbracketed_single_quote_is_refused()
+    {
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = SingleTableMapping("dbo.Src", "dbo.Tbl", "SrcCol", "Col",
+            sourceReference: "O'Brien'; DROP TABLE dbo.Invoices --");
+
+        Assert.Throws<ScriptGenerationException>(
+            () => ScriptGenerator.Generate(mapping, schema, Options()));
+    }
+
+    [Fact]
+    public void SourceReference_with_a_trailing_drop_table_statement_is_refused()
+    {
+        // A well-formed bracket-quoted part is not enough on its own: trailing text after the
+        // closing bracket must also be refused, not silently dropped or accepted.
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = SingleTableMapping("dbo.Src", "dbo.Tbl", "SrcCol", "Col",
+            sourceReference: "[SqlMigratorDemo_Source]; DROP TABLE dbo.Invoices --");
+
+        Assert.Throws<ScriptGenerationException>(
+            () => ScriptGenerator.Generate(mapping, schema, Options()));
     }
 }
