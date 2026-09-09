@@ -1,5 +1,5 @@
-using SqlMigrator.Core.Schema;
 using SqlMigrator.Core.Validation;
+using SqlMigrator.Model.Schema;
 
 namespace SqlMigrator.Core.Tests;
 

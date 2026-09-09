@@ -1,4 +1,4 @@
-namespace SqlMigrator.Core.Schema;
+namespace SqlMigrator.Model.Schema;
 
 /// <summary>A column as SQL Server describes it. MaxLength is in characters for string types, -1 for MAX.</summary>
 public sealed record ColumnInfo(

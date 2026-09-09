@@ -1,4 +1,4 @@
-namespace SqlMigrator.Core.Mapping;
+namespace SqlMigrator.Model.Mapping;
 
 /// <summary>The model's stated intent. Documentation and UI grouping only — the generator uses Expression.</summary>
 public enum RuleKind { Copy, Truncate, Concat, Split, Case, Constant }
