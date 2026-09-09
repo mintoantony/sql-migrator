@@ -16,7 +16,10 @@
         "build": {
           "builder": "@angular/build:application",
           "options": {
-            "outputPath": "../src/SqlMigrator.Api/wwwroot",
+            "outputPath": {
+              "base": "../src/SqlMigrator.Api/wwwroot",
+              "browser": ""
+            },
             "browser": "src/main.ts",
             "tsConfig": "tsconfig.app.json",
             "assets": [
