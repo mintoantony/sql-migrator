@@ -8,3 +8,4 @@ dist/
 appsettings.Local.json
 sql/out/
 *.generated.sql
+src/SqlMigrator.Api/wwwroot/
