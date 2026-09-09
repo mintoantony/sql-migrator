@@ -26,6 +26,7 @@ public sealed class MappingProposer(IChatClient client, AiOptions options)
         progress?.Report("Matching tables…");
         var matches = await MatchTables(source, target, failures, ct);
 
+        var matchedPairs = new List<(TableMatch Match, TableInfo Source, TableInfo Target)>();
         foreach (var match in matches)
         {
             var sourceTable = source.Find(match.SourceTable);
@@ -38,19 +39,53 @@ public sealed class MappingProposer(IChatClient client, AiOptions options)
                 continue;
             }
 
-            progress?.Report($"Mapping columns for {sourceTable.FullName} -> {targetTable.FullName}…");
+            matchedPairs.Add((match, sourceTable, targetTable));
+        }
 
-            var mapped = await MapColumns(sourceTable, targetTable, failures, ct);
-            if (mapped is null) continue;
+        // ColumnBatchSize governs how many table pairs share one column-mapping request. A
+        // batch of exactly one pair goes through the original single-pair call/prompt/shape
+        // unchanged — that is what makes ColumnBatchSize = 1 reproduce today's exact
+        // one-call-per-table behaviour, and it is why ColumnMapResponse is still here.
+        var batchSize = options.ColumnBatchSize <= 0 ? 1 : options.ColumnBatchSize;
 
-            tables.Add(mapped with
+        foreach (var chunk in matchedPairs.Chunk(batchSize))
+        {
+            if (chunk.Length == 1)
             {
-                SourceTable = sourceTable.FullName,
-                TargetTable = targetTable.FullName,
-                Origin = Origin.Ai,
-                Confidence = match.Confidence,
-                Reason = match.Reason
-            });
+                var (match, sourceTable, targetTable) = chunk[0];
+                progress?.Report($"Mapping columns for {sourceTable.FullName} -> {targetTable.FullName}…");
+
+                var mapped = await MapColumns(sourceTable, targetTable, failures, ct);
+                if (mapped is null) continue;
+
+                tables.Add(mapped with
+                {
+                    SourceTable = sourceTable.FullName,
+                    TargetTable = targetTable.FullName,
+                    Origin = Origin.Ai,
+                    Confidence = match.Confidence,
+                    Reason = match.Reason
+                });
+                continue;
+            }
+
+            progress?.Report(
+                $"Mapping columns for {chunk.Length} tables: " +
+                $"{string.Join(", ", chunk.Select(p => $"{p.Source.FullName} -> {p.Target.FullName}"))}…");
+
+            var mappedByTarget = await MapColumnsBatch(chunk, failures, ct);
+
+            foreach (var pair in chunk)
+            {
+                if (!mappedByTarget.TryGetValue(pair.Target.FullName, out var mappedTable)) continue;
+
+                tables.Add(mappedTable with
+                {
+                    Origin = Origin.Ai,
+                    Confidence = pair.Match.Confidence,
+                    Reason = pair.Match.Reason
+                });
+            }
         }
 
         var mapping = new MigrationMapping(
@@ -104,9 +139,77 @@ public sealed class MappingProposer(IChatClient client, AiOptions options)
             return null;
         }
 
+        return BuildTableMapping(sourceTable, targetTable, parsed.Columns, parsed.Unmapped, failures);
+    }
+
+    /// <summary>
+    /// Column mapping for several table pairs in one request. Used whenever a chunk holds more
+    /// than one pair; a lone pair goes through <see cref="MapColumns"/> instead, unchanged.
+    /// </summary>
+    private async Task<Dictionary<string, TableMapping>> MapColumnsBatch(
+        (TableMatch Match, TableInfo Source, TableInfo Target)[] batch, List<string> failures, CancellationToken ct)
+    {
+        var result = new Dictionary<string, TableMapping>(StringComparer.OrdinalIgnoreCase);
+
+        var user = Prompts.ColumnMapBatchUser(batch.Select(p => (p.Source, p.Target)).ToList());
+        var label = $"column mapping for {string.Join(", ", batch.Select(p => p.Target.FullName))}";
+
+        var response = await CallWithOneRetry(Prompts.ColumnMapBatchSystem, user, failures, label, ct);
+        if (response is null) return result;
+
+        BatchColumnMapResponse parsed;
+        try
+        {
+            parsed = AiJson.Deserialize<BatchColumnMapResponse>(response);
+        }
+        catch (AiException ex)
+        {
+            failures.Add($"Gave up on {label}: {ex.Message}");
+            return result;
+        }
+
+        var byTarget = new Dictionary<string, TableColumnMap>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in parsed.Tables)
+        {
+            var inBatch = batch.Any(p => string.Equals(p.Target.FullName, entry.TargetTable, StringComparison.OrdinalIgnoreCase));
+            if (!inBatch)
+            {
+                failures.Add($"Model's column-mapping response named {entry.TargetTable}, which is not part of " +
+                             "this batch. Ignored.");
+                continue;
+            }
+
+            if (!byTarget.TryAdd(entry.TargetTable, entry))
+            {
+                failures.Add($"Model's column-mapping response named {entry.TargetTable} more than once. " +
+                             "Kept the first entry and discarded the rest.");
+            }
+        }
+
+        foreach (var (_, sourceTable, targetTable) in batch)
+        {
+            if (!byTarget.TryGetValue(targetTable.FullName, out var entry))
+            {
+                failures.Add($"Model omitted {targetTable.FullName} from the column-mapping batch response. " +
+                             "Left unmapped.");
+                continue;
+            }
+
+            result[targetTable.FullName] = BuildTableMapping(sourceTable, targetTable, entry.Columns, entry.Unmapped, failures);
+        }
+
+        return result;
+    }
+
+    /// <summary>Shared column/unmapped validation for both the single-pair and batched shapes.</summary>
+    private static TableMapping BuildTableMapping(
+        TableInfo sourceTable, TableInfo targetTable,
+        IReadOnlyList<ColumnProposal> proposedColumns, IReadOnlyList<UnmappedProposal> proposedUnmapped,
+        List<string> failures)
+    {
         var columns = new List<ColumnMapping>();
         var seenTargetColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var proposal in parsed.Columns)
+        foreach (var proposal in proposedColumns)
         {
             if (targetTable.Column(proposal.TargetColumn) is null)
             {
@@ -134,7 +237,7 @@ public sealed class MappingProposer(IChatClient client, AiOptions options)
                 proposal.Confidence, proposal.Reason));
         }
 
-        var unmapped = parsed.Unmapped
+        var unmapped = proposedUnmapped
             .Where(u => targetTable.Column(u.TargetColumn) is not null)
             .Select(u => new UnmappedColumn(u.TargetColumn, u.Reason))
             .ToList();

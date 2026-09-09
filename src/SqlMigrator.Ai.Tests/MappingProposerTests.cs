@@ -232,7 +232,10 @@ public class MappingProposerTests
             new HttpRequestException("connection reset"),
             new HttpRequestException("connection reset"),
             purchaseColumns);
-        var proposer = new MappingProposer(client, new AiOptions { Model = "m" });
+        // ColumnBatchSize = 1: this test is about one table's failure staying isolated from
+        // another table's success, which is a batch-of-1-per-table guarantee. At the default
+        // batch size the two pairs here would share one batched request/response instead.
+        var proposer = new MappingProposer(client, new AiOptions { Model = "m", ColumnBatchSize = 1 });
 
         var result = await proposer.ProposeAsync(source, target, "[SrcDb]");
 
@@ -251,5 +254,134 @@ public class MappingProposerTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             proposer.ProposeAsync(Source(), Target(), "[SrcDb]", ct: cts.Token));
+    }
+
+    // --- Column-mapping batching (Ai:ColumnBatchSize) ------------------------------------
+
+    private static (DbSchema Source, DbSchema Target) ThreeTableSchemas() => (
+        new DbSchema("SrcDb",
+            [
+                new TableInfo("dbo", "Customer", [new ColumnInfo("CustomerId", "int", 4, 10, 0, false, true, false, 1)], ["CustomerId"]),
+                new TableInfo("dbo", "Order", [new ColumnInfo("OrderId", "int", 4, 10, 0, false, true, false, 1)], ["OrderId"]),
+                new TableInfo("dbo", "Product", [new ColumnInfo("ProductId", "int", 4, 10, 0, false, true, false, 1)], ["ProductId"])
+            ], []),
+        new DbSchema("TgtDb",
+            [
+                new TableInfo("dbo", "Client", [new ColumnInfo("ClientId", "int", 4, 10, 0, false, true, false, 1)], ["ClientId"]),
+                new TableInfo("dbo", "Purchase", [new ColumnInfo("PurchaseId", "int", 4, 10, 0, false, true, false, 1)], ["PurchaseId"]),
+                new TableInfo("dbo", "Item", [new ColumnInfo("ItemId", "int", 4, 10, 0, false, true, false, 1)], ["ItemId"])
+            ], []));
+
+    private const string MatchThreeTables = """
+        {"matches":[
+          {"sourceTable":"dbo.Customer","targetTable":"dbo.Client","confidence":0.9,"reason":"Customers."},
+          {"sourceTable":"dbo.Order","targetTable":"dbo.Purchase","confidence":0.9,"reason":"Orders."},
+          {"sourceTable":"dbo.Product","targetTable":"dbo.Item","confidence":0.9,"reason":"Products."}]}
+        """;
+
+    private const string BatchColumnsThree = """
+        {"tables":[
+          {"targetTable":"dbo.Client","columns":[{"targetColumn":"ClientId","rule":"copy","expression":"CustomerId","confidence":0.9,"reason":"Key."}]},
+          {"targetTable":"dbo.Purchase","columns":[{"targetColumn":"PurchaseId","rule":"copy","expression":"OrderId","confidence":0.9,"reason":"Key."}]},
+          {"targetTable":"dbo.Item","columns":[{"targetColumn":"ItemId","rule":"copy","expression":"ProductId","confidence":0.9,"reason":"Key."}]}]}
+        """;
+
+    [Fact]
+    public async Task Several_pairs_in_one_batch_issue_a_single_request_and_every_pair_is_mapped()
+    {
+        var (source, target) = ThreeTableSchemas();
+        var client = new ScriptedClient(MatchThreeTables, BatchColumnsThree);
+        var proposer = new MappingProposer(client, new AiOptions { Model = "m", ColumnBatchSize = 5 });
+
+        var result = await proposer.ProposeAsync(source, target, "[SrcDb]");
+
+        Assert.Equal(2, client.CallCount);   // one match pass, one batched column pass for all 3 pairs
+        Assert.Empty(result.Failures);
+        Assert.Equal(3, result.Mapping.Tables.Count);
+        Assert.Contains(result.Mapping.Tables, t => t.TargetTable == "dbo.Client" && t.Columns.Count == 1);
+        Assert.Contains(result.Mapping.Tables, t => t.TargetTable == "dbo.Purchase" && t.Columns.Count == 1);
+        Assert.Contains(result.Mapping.Tables, t => t.TargetTable == "dbo.Item" && t.Columns.Count == 1);
+    }
+
+    [Fact]
+    public async Task ColumnBatchSize_of_one_reproduces_one_request_per_table_pair()
+    {
+        var (source, target) = ThreeTableSchemas();
+        const string clientColumns = """
+            {"columns":[{"targetColumn":"ClientId","rule":"copy","expression":"CustomerId","confidence":0.9,"reason":"Key."}]}
+            """;
+        const string purchaseColumns = """
+            {"columns":[{"targetColumn":"PurchaseId","rule":"copy","expression":"OrderId","confidence":0.9,"reason":"Key."}]}
+            """;
+        const string itemColumns = """
+            {"columns":[{"targetColumn":"ItemId","rule":"copy","expression":"ProductId","confidence":0.9,"reason":"Key."}]}
+            """;
+        var client = new ScriptedClient(MatchThreeTables, clientColumns, purchaseColumns, itemColumns);
+        var proposer = new MappingProposer(client, new AiOptions { Model = "m", ColumnBatchSize = 1 });
+
+        var result = await proposer.ProposeAsync(source, target, "[SrcDb]");
+
+        Assert.Equal(4, client.CallCount);   // match + one column request per table pair
+        Assert.Empty(result.Failures);
+        Assert.Equal(3, result.Mapping.Tables.Count);
+    }
+
+    [Fact]
+    public async Task Batching_across_a_boundary_issues_exactly_two_requests_for_three_pairs_at_batch_size_two()
+    {
+        var (source, target) = ThreeTableSchemas();
+        const string batchColumnsTwo = """
+            {"tables":[
+              {"targetTable":"dbo.Client","columns":[{"targetColumn":"ClientId","rule":"copy","expression":"CustomerId","confidence":0.9,"reason":"Key."}]},
+              {"targetTable":"dbo.Purchase","columns":[{"targetColumn":"PurchaseId","rule":"copy","expression":"OrderId","confidence":0.9,"reason":"Key."}]}]}
+            """;
+        const string itemColumns = """
+            {"columns":[{"targetColumn":"ItemId","rule":"copy","expression":"ProductId","confidence":0.9,"reason":"Key."}]}
+            """;
+        var client = new ScriptedClient(MatchThreeTables, batchColumnsTwo, itemColumns);
+        var proposer = new MappingProposer(client, new AiOptions { Model = "m", ColumnBatchSize = 2 });
+
+        var result = await proposer.ProposeAsync(source, target, "[SrcDb]");
+
+        Assert.Equal(3, client.CallCount);   // match + exactly 2 column-mapping requests (batch of 2, then batch of 1)
+        Assert.Empty(result.Failures);
+        Assert.Equal(3, result.Mapping.Tables.Count);
+    }
+
+    [Fact]
+    public async Task A_pair_omitted_from_a_batch_response_is_recorded_as_a_failure_and_left_unmapped()
+    {
+        var source = new DbSchema("SrcDb",
+            [
+                new TableInfo("dbo", "Customer", [new ColumnInfo("CustomerId", "int", 4, 10, 0, false, true, false, 1)], ["CustomerId"]),
+                new TableInfo("dbo", "Order", [new ColumnInfo("OrderId", "int", 4, 10, 0, false, true, false, 1)], ["OrderId"])
+            ], []);
+        var target = new DbSchema("TgtDb",
+            [
+                new TableInfo("dbo", "Client", [new ColumnInfo("ClientId", "int", 4, 10, 0, false, true, false, 1)], ["ClientId"]),
+                new TableInfo("dbo", "Purchase", [new ColumnInfo("PurchaseId", "int", 4, 10, 0, false, true, false, 1)], ["PurchaseId"])
+            ], []);
+
+        const string matchTwoTables = """
+            {"matches":[
+              {"sourceTable":"dbo.Customer","targetTable":"dbo.Client","confidence":0.9,"reason":"Customers."},
+              {"sourceTable":"dbo.Order","targetTable":"dbo.Purchase","confidence":0.9,"reason":"Orders."}]}
+            """;
+
+        // The model only answers for dbo.Client, silently omitting dbo.Purchase from the batch.
+        const string batchMissingPurchase = """
+            {"tables":[
+              {"targetTable":"dbo.Client","columns":[{"targetColumn":"ClientId","rule":"copy","expression":"CustomerId","confidence":0.9,"reason":"Key."}]}]}
+            """;
+
+        var client = new ScriptedClient(matchTwoTables, batchMissingPurchase);
+        var proposer = new MappingProposer(client, new AiOptions { Model = "m", ColumnBatchSize = 2 });
+
+        var result = await proposer.ProposeAsync(source, target, "[SrcDb]");
+
+        Assert.Equal(2, client.CallCount);   // match + one batched column request — the batch itself did not fail
+        var table = Assert.Single(result.Mapping.Tables);
+        Assert.Equal("dbo.Client", table.TargetTable);
+        Assert.Contains(result.Failures, f => f.Contains("dbo.Purchase") && f.Contains("omitted", StringComparison.OrdinalIgnoreCase));
     }
 }

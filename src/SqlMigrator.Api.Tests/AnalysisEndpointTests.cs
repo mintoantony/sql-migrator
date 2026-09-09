@@ -7,7 +7,16 @@ using SqlMigrator.Api;
 
 namespace SqlMigrator.Api.Tests;
 
-/// <summary>Replaces the real model with scripted responses so the endpoint test needs no API key.</summary>
+/// <summary>
+/// Replaces the real model with scripted responses so the endpoint test needs no API key.
+///
+/// MappingProposer sends one column-mapping request for all matched pairs at once whenever
+/// more than one pair lands in a batch (the default Ai:ColumnBatchSize is 5, and this fixture
+/// has 3 matched pairs, so they all land in a single batch) — the request carries "TABLE PAIR"
+/// markers per pair and expects a single {"tables":[...]} response keyed by target table name.
+/// A batch of exactly one pair still uses the original single-pair {"columns":[...]} shape, so
+/// both are handled here.
+/// </summary>
 public sealed class ScriptedChatClient : IChatClient
 {
     private int _index;
@@ -25,35 +34,55 @@ public sealed class ScriptedChatClient : IChatClient
           {"sourceTable":"dbo.OrderLine","targetTable":"dbo.OrderLine","confidence":0.97,"reason":"Lines."}]}
         """;
 
+    private const string ClientColumns = """
+        {"targetColumn":"ClientId","rule":"copy","expression":"CustomerId","confidence":0.99,"reason":"Key."},
+          {"targetColumn":"FullName","rule":"concat","expression":"CONCAT(FirstName, ' ', LastName)","confidence":0.9,"reason":"Two parts."},
+          {"targetColumn":"ShortName","rule":"truncate","expression":"LEFT(LastName, 20)","confidence":0.85,"reason":"Fits 20."},
+          {"targetColumn":"EmailAddress","rule":"copy","expression":"Email","confidence":0.95,"reason":"Same."},
+          {"targetColumn":"EmailDomain","rule":"split","expression":"SUBSTRING(Email, CHARINDEX('@', Email) + 1, 100)","confidence":0.8,"reason":"After the at sign."},
+          {"targetColumn":"Summary","rule":"truncate","expression":"LEFT(Description, 100)","confidence":0.8,"reason":"Fits 100."},
+          {"targetColumn":"Active","rule":"case","expression":"CAST(CASE WHEN IsActive = 1 THEN 1 ELSE 0 END AS bit)","confidence":0.9,"reason":"Bit."},
+          {"targetColumn":"CreatedUtc","rule":"copy","expression":"CreatedUtc","confidence":0.99,"reason":"Same."},
+          {"targetColumn":"MigratedUtc","rule":"constant","expression":"SYSUTCDATETIME()","confidence":0.6,"reason":"Now."}
+        """;
+    private const string ClientUnmapped = """{"targetColumn":"Notes","reason":"No source column."}""";
+
+    private const string OrderLineColumns = """
+        {"targetColumn":"OrderLineId","rule":"copy","expression":"OrderLineId","confidence":0.99,"reason":"Key."},
+          {"targetColumn":"OrderId","rule":"copy","expression":"OrderId","confidence":0.99,"reason":"Key."},
+          {"targetColumn":"ProductName","rule":"copy","expression":"Product","confidence":0.9,"reason":"Renamed."},
+          {"targetColumn":"Quantity","rule":"copy","expression":"Qty","confidence":0.9,"reason":"Renamed."},
+          {"targetColumn":"UnitPrice","rule":"copy","expression":"UnitPrice","confidence":0.99,"reason":"Same."}
+        """;
+
+    private const string OrderColumns = """
+        {"targetColumn":"OrderId","rule":"copy","expression":"OrderId","confidence":0.99,"reason":"Key."},
+          {"targetColumn":"ClientId","rule":"copy","expression":"CustomerId","confidence":0.9,"reason":"Renamed FK."},
+          {"targetColumn":"OrderDate","rule":"copy","expression":"OrderDate","confidence":0.99,"reason":"Same."},
+          {"targetColumn":"Total","rule":"copy","expression":"Total","confidence":0.99,"reason":"Same."}
+        """;
+
     private static string Columns(string userPrompt) =>
-        userPrompt.Contains("dbo.Client") ? """
-            {"columns":[
-              {"targetColumn":"ClientId","rule":"copy","expression":"CustomerId","confidence":0.99,"reason":"Key."},
-              {"targetColumn":"FullName","rule":"concat","expression":"CONCAT(FirstName, ' ', LastName)","confidence":0.9,"reason":"Two parts."},
-              {"targetColumn":"ShortName","rule":"truncate","expression":"LEFT(LastName, 20)","confidence":0.85,"reason":"Fits 20."},
-              {"targetColumn":"EmailAddress","rule":"copy","expression":"Email","confidence":0.95,"reason":"Same."},
-              {"targetColumn":"EmailDomain","rule":"split","expression":"SUBSTRING(Email, CHARINDEX('@', Email) + 1, 100)","confidence":0.8,"reason":"After the at sign."},
-              {"targetColumn":"Summary","rule":"truncate","expression":"LEFT(Description, 100)","confidence":0.8,"reason":"Fits 100."},
-              {"targetColumn":"Active","rule":"case","expression":"CAST(CASE WHEN IsActive = 1 THEN 1 ELSE 0 END AS bit)","confidence":0.9,"reason":"Bit."},
-              {"targetColumn":"CreatedUtc","rule":"copy","expression":"CreatedUtc","confidence":0.99,"reason":"Same."},
-              {"targetColumn":"MigratedUtc","rule":"constant","expression":"SYSUTCDATETIME()","confidence":0.6,"reason":"Now."}],
-             "unmapped":[{"targetColumn":"Notes","reason":"No source column."}]}
-            """
-        : userPrompt.Contains("dbo.OrderLine") ? """
-            {"columns":[
-              {"targetColumn":"OrderLineId","rule":"copy","expression":"OrderLineId","confidence":0.99,"reason":"Key."},
-              {"targetColumn":"OrderId","rule":"copy","expression":"OrderId","confidence":0.99,"reason":"Key."},
-              {"targetColumn":"ProductName","rule":"copy","expression":"Product","confidence":0.9,"reason":"Renamed."},
-              {"targetColumn":"Quantity","rule":"copy","expression":"Qty","confidence":0.9,"reason":"Renamed."},
-              {"targetColumn":"UnitPrice","rule":"copy","expression":"UnitPrice","confidence":0.99,"reason":"Same."}]}
-            """
-        : """
-            {"columns":[
-              {"targetColumn":"OrderId","rule":"copy","expression":"OrderId","confidence":0.99,"reason":"Key."},
-              {"targetColumn":"ClientId","rule":"copy","expression":"CustomerId","confidence":0.9,"reason":"Renamed FK."},
-              {"targetColumn":"OrderDate","rule":"copy","expression":"OrderDate","confidence":0.99,"reason":"Same."},
-              {"targetColumn":"Total","rule":"copy","expression":"Total","confidence":0.99,"reason":"Same."}]}
-            """;
+        userPrompt.Contains("TABLE PAIR") ? BatchColumns(userPrompt) : SingleColumns(userPrompt);
+
+    /// <summary>The batched {"tables":[...]} shape — one entry per pair the prompt actually asked for.</summary>
+    private static string BatchColumns(string userPrompt)
+    {
+        var entries = new List<string>();
+        if (userPrompt.Contains("(target table: dbo.Client)"))
+            entries.Add($$"""{"targetTable":"dbo.Client","columns":[{{ClientColumns}}],"unmapped":[{{ClientUnmapped}}]}""");
+        if (userPrompt.Contains("(target table: dbo.OrderLine)"))
+            entries.Add($$"""{"targetTable":"dbo.OrderLine","columns":[{{OrderLineColumns}}]}""");
+        if (userPrompt.Contains("(target table: dbo.Order)"))
+            entries.Add($$"""{"targetTable":"dbo.Order","columns":[{{OrderColumns}}]}""");
+        return $$"""{"tables":[{{string.Join(",", entries)}}]}""";
+    }
+
+    /// <summary>The original single-pair {"columns":[...]} shape, used for a batch of exactly one pair.</summary>
+    private static string SingleColumns(string userPrompt) =>
+        userPrompt.Contains("dbo.Client") ? $$"""{"columns":[{{ClientColumns}}],"unmapped":[{{ClientUnmapped}}]}"""
+        : userPrompt.Contains("dbo.OrderLine") ? $$"""{"columns":[{{OrderLineColumns}}]}"""
+        : $$"""{"columns":[{{OrderColumns}}]}""";
 }
 
 [Collection("api-sql")]

@@ -117,6 +117,7 @@ databases and nothing else.
 | `Ai:ApiKey` | *(empty)* | `NVIDIA_API_KEY` is preferred; never commit a key |
 | `Ai:ConfidenceThreshold` | `0.75` | At or above this, a proposal arrives pre-ticked in the review grid |
 | `Ai:TimeoutSeconds` | `120` | Per request, applied as a linked cancellation |
+| `Ai:ColumnBatchSize` | `5` | Table pairs mapped per column-mapping request. `1` reproduces one request per table pair |
 
 The API always binds `http://127.0.0.1:5199` — that is set in code, not configuration, and
 deliberately not overridable by `ASPNETCORE_URLS`. This process can reach two databases and

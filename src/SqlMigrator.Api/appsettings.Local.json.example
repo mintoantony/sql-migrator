@@ -3,6 +3,7 @@
     "BaseUrl": "https://integrate.api.nvidia.com/v1",
     "Model": "<model id from the NIM catalogue>",
     "ApiKey": "<or set NVIDIA_API_KEY instead — preferred>",
-    "ConfidenceThreshold": 0.75
+    "ConfidenceThreshold": 0.75,
+    "ColumnBatchSize": 5
   }
 }
