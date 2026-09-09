@@ -1,6 +1,9 @@
 using Microsoft.Data.SqlClient;
 using SqlMigrator.Ai;
 using SqlMigrator.Api;
+using SqlMigrator.Core.Generation;
+using SqlMigrator.Core.Validation;
+using SqlMigrator.Model.Mapping;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -94,6 +97,133 @@ app.MapGet("/api/analyse/{id}", (string id, SessionStore store) =>
         result.State, result.Step, result.Mapping,
         session.Issues.ToList(), session.Failures.ToList(), session.UnmatchedSourceTables.ToList(),
         result.Error));
+});
+
+app.MapPost("/api/expression/validate", async (
+    ValidateExpressionRequest request, SessionStore store, CancellationToken ct) =>
+{
+    var session = store.Get(request.SessionId);
+    if (session?.SourceSchema is null || session.TargetSchema is null) return Results.NotFound();
+
+    var issues = new List<IssueDto>();
+
+    // Gate 1: the textual screen. A human just edited this expression, which makes it the most
+    // likely place someone pastes something dangerous — it gets no exemption from any gate.
+    var screen = ExpressionScreen.Screen(request.Expression);
+    if (!screen.Ok)
+    {
+        issues.Add(new IssueDto("EXP001", "Blocking", screen.Reason!, request.TargetTable, request.TargetColumn));
+        return Results.Ok(new ValidateExpressionResponse(false, null, issues));
+    }
+
+    // Gate 2: a real compile via SELECT TOP 0 under SchemaOnly. Unlike the mapping-driven paths,
+    // SourceTable here comes straight from the caller rather than a name already confirmed to
+    // exist in a schema we just read, so SqlExpressionCompiler's ArgumentException for a malformed
+    // table name is reachable and is turned into a validation issue rather than a 500.
+    // OperationCanceledException and genuine connection failures are left to propagate: an
+    // unreachable database is a server-side problem, not "your expression is invalid".
+    var compiler = new SqlExpressionCompiler(session.SourceConnectionString);
+    CompileResult compiled;
+    try
+    {
+        compiled = await compiler.CompileAsync(request.SourceTable, request.Expression, ct);
+    }
+    catch (ArgumentException ex)
+    {
+        issues.Add(new IssueDto("EXP003", "Blocking", $"Invalid source table: {ex.Message}",
+            request.TargetTable, request.TargetColumn));
+        return Results.Ok(new ValidateExpressionResponse(false, null, issues));
+    }
+
+    if (!compiled.Ok)
+    {
+        issues.Add(new IssueDto("EXP002", "Blocking",
+            $"Expression did not compile: {compiled.Error}", request.TargetTable, request.TargetColumn));
+        return Results.Ok(new ValidateExpressionResponse(false, null, issues));
+    }
+
+    var targetColumn = session.TargetSchema.Find(request.TargetTable)?.Column(request.TargetColumn);
+    if (targetColumn is null)
+    {
+        issues.Add(new IssueDto("MAP003", "Blocking",
+            $"Target column {request.TargetColumn} does not exist on {request.TargetTable}.",
+            request.TargetTable, request.TargetColumn));
+        return Results.Ok(new ValidateExpressionResponse(false, null, issues));
+    }
+
+    // Gate 3: the type check.
+    var check = TypeCompatibility.Check(compiled.ResultType!, targetColumn);
+    if (!check.Compatible)
+        issues.Add(new IssueDto("TYP001", "Blocking", check.Message!, request.TargetTable, request.TargetColumn));
+    else if (check.Narrowing)
+        issues.Add(new IssueDto("TYP002", "Warning", check.Message!, request.TargetTable, request.TargetColumn));
+
+    var typeName = $"{compiled.ResultType!.DataType}" +
+                   (compiled.ResultType.MaxLength > 0 ? $"({compiled.ResultType.MaxLength})" : "");
+
+    return Results.Ok(new ValidateExpressionResponse(check.Compatible, typeName, issues));
+});
+
+app.MapPost("/api/mapping/save", (SaveMappingRequest request, SessionStore store) =>
+{
+    var session = store.Get(request.SessionId);
+    if (session is null) return Results.NotFound();
+
+    var mapping = DtoMapper.ToDomain(request.Mapping, DateTimeOffset.UtcNow);
+    var xml = MappingXml.Write(mapping);
+
+    var directory = Path.Combine(AppContext.BaseDirectory, "mappings");
+    Directory.CreateDirectory(directory);
+    var path = Path.Combine(directory, $"{mapping.TargetDatabase}-{DateTime.UtcNow:yyyyMMdd-HHmmss}.xml");
+    File.WriteAllText(path, xml);
+
+    var sha = Convert.ToHexStringLower(
+        System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(xml)));
+
+    return Results.Ok(new SaveMappingResponse(path, sha));
+});
+
+app.MapPost("/api/script/generate", async (
+    GenerateScriptRequest request, SessionStore store, CancellationToken ct) =>
+{
+    var session = store.Get(request.SessionId);
+    if (session?.SourceSchema is null || session.TargetSchema is null) return Results.NotFound();
+
+    var mapping = DtoMapper.ToDomain(request.Mapping, DateTimeOffset.UtcNow);
+
+    // The human-approved mapping is re-proven from scratch — the same validator, the same three
+    // gates per expression, run again against the live database. Nothing here trusts that an
+    // earlier /api/expression/validate call ever happened for any given cell.
+    var compiler = new SqlExpressionCompiler(session.SourceConnectionString);
+    var validator = new MappingValidator(session.SourceSchema, session.TargetSchema, compiler);
+    var issues = await validator.ValidateAsync(mapping, ct);
+
+    // Last gate before a human runs SQL against a real database: refuse outright if anything
+    // blocking still stands, no matter what the request claims was already fixed.
+    if (issues.HasBlocking())
+    {
+        return Results.BadRequest(new GenerateScriptResponse(
+            "", issues.Where(i => i.Severity == Severity.Blocking).Select(DtoMapper.ToDto).ToList()));
+    }
+
+    var xml = MappingXml.Write(mapping);
+    var sha = Convert.ToHexStringLower(
+        System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(xml)));
+
+    try
+    {
+        var sql = ScriptGenerator.Generate(mapping, session.TargetSchema, new ScriptOptions(
+            session.SourceServer, session.TargetServer, DateTimeOffset.UtcNow, "reviewed mapping", sha));
+
+        return Results.Ok(new GenerateScriptResponse(sql, issues.Select(DtoMapper.ToDto).ToList()));
+    }
+    catch (ScriptGenerationException ex)
+    {
+        // A foreign-key cycle is only detectable at generation time, so it surfaces here
+        // as ORD001 rather than as an unhandled 500.
+        return Results.BadRequest(new GenerateScriptResponse("",
+            [new IssueDto("ORD001", "Blocking", ex.Message, null, null)]));
+    }
 });
 
 app.Run();

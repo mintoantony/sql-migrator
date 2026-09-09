@@ -56,6 +56,7 @@ public sealed class ScriptedChatClient : IChatClient
             """;
 }
 
+[Collection("api-sql")]
 public class AnalysisEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly HttpClient _client;
@@ -69,9 +70,9 @@ public class AnalysisEndpointTests : IClassFixture<WebApplicationFactory<Program
         Environment.GetEnvironmentVariable("SQLMIGRATOR_TEST_SQL") ?? "localhost";
 
     private static AnalyseRequest Request() => new(
-        new ConnectionRequest(Server, "SqlMigratorDemo_Source"),
-        new ConnectionRequest(Server, "SqlMigratorDemo_Target"),
-        "[SqlMigratorDemo_Source]");
+        new ConnectionRequest(Server, ApiTestDatabases.SourceDb),
+        new ConnectionRequest(Server, ApiTestDatabases.TargetDb),
+        $"[{ApiTestDatabases.SourceDb}]");
 
     private async Task<SessionStatus> RunToCompletion()
     {
