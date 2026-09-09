@@ -14,4 +14,11 @@
     <EmbeddedResource Include="..\..\mappings\migration.xsd" LogicalName="SqlMigrator.Core.migration.xsd" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Identifier quoting is an implementation detail, but it is the only barrier
+         between a caller-supplied table name and the command text, so it is tested
+         directly rather than only through a live database round-trip. -->
+    <InternalsVisibleTo Include="SqlMigrator.Core.Tests" />
+  </ItemGroup>
+
 </Project>
