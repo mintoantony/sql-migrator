@@ -29,7 +29,11 @@ public sealed record SessionStatus(
     List<IssueDto> Issues,
     List<string> Failures,
     List<string> UnmatchedSourceTables,
-    string? Error);
+    string? Error,
+    // Configured server-side (Ai:ConfidenceThreshold) and served here so the review grid's
+    // pre-accept logic uses the one value an operator can actually change, instead of a
+    // hardcoded duplicate on the browser side.
+    double ConfidenceThreshold);
 
 public sealed record ValidateExpressionRequest(
     string SessionId, string SourceTable, string TargetTable, string TargetColumn, string Expression);

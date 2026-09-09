@@ -85,7 +85,7 @@ app.MapPost("/api/analyse", (
     return Results.Ok(new AnalyseStarted(session.Id));
 });
 
-app.MapGet("/api/analyse/{id}", (string id, SessionStore store) =>
+app.MapGet("/api/analyse/{id}", (string id, SessionStore store, AiOptions aiOptions) =>
 {
     var session = store.Get(id);
     if (session is null) return Results.NotFound();
@@ -96,7 +96,7 @@ app.MapGet("/api/analyse/{id}", (string id, SessionStore store) =>
     return Results.Ok(new SessionStatus(
         result.State, result.Step, result.Mapping,
         session.Issues.ToList(), session.Failures.ToList(), session.UnmatchedSourceTables.ToList(),
-        result.Error));
+        result.Error, aiOptions.ConfidenceThreshold));
 });
 
 app.MapPost("/api/expression/validate", async (
@@ -174,7 +174,19 @@ app.MapPost("/api/mapping/save", (SaveMappingRequest request, SessionStore store
 
     var directory = Path.Combine(AppContext.BaseDirectory, "mappings");
     Directory.CreateDirectory(directory);
-    var path = Path.Combine(directory, $"{mapping.TargetDatabase}-{DateTime.UtcNow:yyyyMMdd-HHmmss}.xml");
+
+    string path;
+    try
+    {
+        // TargetDatabase arrives on the request body and is untrusted: it must not be able to
+        // steer where this file gets written. See MappingFileNames for the validation.
+        path = MappingFileNames.BuildPath(directory, mapping.TargetDatabase, DateTimeOffset.UtcNow);
+    }
+    catch (ArgumentException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+
     File.WriteAllText(path, xml);
 
     var sha = Convert.ToHexStringLower(

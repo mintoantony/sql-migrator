@@ -49,6 +49,16 @@ describe('ReviewStep', () => {
     expect(fixture.componentInstance.accepted('dbo.Client', 'FullName')).toBe(false);
   });
 
+  it('toggling a checkbox flips accept state, and toggling again restores it', () => {
+    const component = fixture.componentInstance;
+
+    expect(component.accepted('dbo.Client', 'ClientId')).toBe(true);
+    component.toggle('dbo.Client', 'ClientId');
+    expect(component.accepted('dbo.Client', 'ClientId')).toBe(false);
+    component.toggle('dbo.Client', 'ClientId');
+    expect(component.accepted('dbo.Client', 'ClientId')).toBe(true);
+  });
+
   it('disables generate while a blocking issue stands', () => {
     service.issues.set([
       { code: 'EXP002', severity: 'Blocking', message: 'no', table: 'dbo.Client', column: 'FullName' },
