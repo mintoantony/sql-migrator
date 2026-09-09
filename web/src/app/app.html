@@ -1,0 +1,25 @@
+<h1>SQL Migrator</h1>
+
+<mat-stepper [selectedIndex]="step()" linear>
+  <mat-step label="Connections">
+    <app-connections-step (started)="next()" />
+  </mat-step>
+
+  <mat-step label="Analyse">
+    @if (step() === 1) {
+      <app-analyse-step (finished)="next()" (back)="goTo(0)" />
+    }
+  </mat-step>
+
+  <mat-step label="Review">
+    @if (step() === 2) {
+      <app-review-step (generate)="next()" />
+    }
+  </mat-step>
+
+  <mat-step label="Script">
+    @if (step() === 3) {
+      <app-script-step />
+    }
+  </mat-step>
+</mat-stepper>

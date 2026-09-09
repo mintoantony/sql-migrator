@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified">
+
+  <xs:simpleType name="ruleKind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="copy" />
+      <xs:enumeration value="truncate" />
+      <xs:enumeration value="concat" />
+      <xs:enumeration value="split" />
+      <xs:enumeration value="case" />
+      <xs:enumeration value="constant" />
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="originKind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="ai" />
+      <xs:enumeration value="human" />
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:element name="migration">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="source">
+          <xs:complexType>
+            <xs:attribute name="database"  type="xs:string" use="required" />
+            <xs:attribute name="reference" type="xs:string" use="required" />
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="target">
+          <xs:complexType>
+            <xs:attribute name="database" type="xs:string" use="required" />
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="table" minOccurs="0" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="reason" type="xs:string" minOccurs="0" />
+              <xs:element name="column" minOccurs="0" maxOccurs="unbounded">
+                <xs:complexType>
+                  <xs:attribute name="target"     type="xs:string"   use="required" />
+                  <xs:attribute name="rule"       type="ruleKind"    use="required" />
+                  <xs:attribute name="expression" type="xs:string"   use="required" />
+                  <xs:attribute name="origin"     type="originKind"  use="required" />
+                  <xs:attribute name="confidence" type="xs:double" />
+                  <xs:attribute name="reason"     type="xs:string" />
+                </xs:complexType>
+              </xs:element>
+              <xs:element name="unmapped" minOccurs="0" maxOccurs="unbounded">
+                <xs:complexType>
+                  <xs:attribute name="target" type="xs:string" use="required" />
+                  <xs:attribute name="reason" type="xs:string" use="required" />
+                </xs:complexType>
+              </xs:element>
+            </xs:sequence>
+            <xs:attribute name="source"     type="xs:string"  use="required" />
+            <xs:attribute name="target"     type="xs:string"  use="required" />
+            <xs:attribute name="origin"     type="originKind" use="required" />
+            <xs:attribute name="confidence" type="xs:double" />
+          </xs:complexType>
+        </xs:element>
+      </xs:sequence>
+      <xs:attribute name="name"      type="xs:string"   use="required" />
+      <xs:attribute name="generated" type="xs:dateTime" use="required" />
+      <xs:attribute name="model"     type="xs:string" />
+    </xs:complexType>
+  </xs:element>
+</xs:schema>
