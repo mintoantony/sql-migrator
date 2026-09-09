@@ -245,6 +245,55 @@ public class MappingProposerTests
         Assert.Contains(result.Failures, f => f.Contains("dbo.Client") && f.Contains("connection reset"));
     }
 
+    /// <summary>
+    /// The property the whole batching trade rests on. Batching coarsens isolation from
+    /// per-table to per-batch, and that is only acceptable if a failed batch is genuinely
+    /// contained — the batches after it must still map. If one failure aborted the rest, a
+    /// single provider hiccup would cost an entire migration and batching would be a bad
+    /// deal. A review found this correct by inspection but untested.
+    /// </summary>
+    [Fact]
+    public async Task A_failed_batch_leaves_a_later_batch_unaffected()
+    {
+        var source = new DbSchema("SrcDb",
+            [
+                new TableInfo("dbo", "A", [new ColumnInfo("AId", "int", 4, 10, 0, false, true, false, 1)], ["AId"]),
+                new TableInfo("dbo", "B", [new ColumnInfo("BId", "int", 4, 10, 0, false, true, false, 1)], ["BId"])
+            ], []);
+
+        var target = new DbSchema("TgtDb",
+            [
+                new TableInfo("dbo", "TA", [new ColumnInfo("TAId", "int", 4, 10, 0, false, true, false, 1)], ["TAId"]),
+                new TableInfo("dbo", "TB", [new ColumnInfo("TBId", "int", 4, 10, 0, false, true, false, 1)], ["TBId"])
+            ], []);
+
+        const string matchTwo = """
+            {"matches":[
+              {"sourceTable":"dbo.A","targetTable":"dbo.TA","confidence":0.9,"reason":"A."},
+              {"sourceTable":"dbo.B","targetTable":"dbo.TB","confidence":0.9,"reason":"B."}]}
+            """;
+
+        const string secondBatch = """
+            {"columns":[{"targetColumn":"TBId","rule":"copy","expression":"BId","confidence":0.9,"reason":"Key."}]}
+            """;
+
+        // ColumnBatchSize = 1 puts each pair in its own batch, so these are two independent
+        // batches: the first fails on both attempts, the second must still succeed.
+        var client = new ScriptedClient(
+            matchTwo,
+            new HttpRequestException("connection reset"),
+            new HttpRequestException("connection reset"),
+            secondBatch);
+        var proposer = new MappingProposer(client, new AiOptions { Model = "m", ColumnBatchSize = 1 });
+
+        var result = await proposer.ProposeAsync(source, target, "[SrcDb]");
+
+        var mapped = Assert.Single(result.Mapping.Tables);
+        Assert.Equal("dbo.TB", mapped.TargetTable);
+        Assert.Contains(result.Failures, f => f.Contains("dbo.TA"));
+        Assert.DoesNotContain(result.Failures, f => f.Contains("dbo.TB"));
+    }
+
     [Fact]
     public async Task Caller_cancellation_propagates_instead_of_being_recorded_as_a_failure()
     {
