@@ -72,4 +72,39 @@ public class TypeCompatibilityTests
         Assert.Equal(TypeCategory.String, TypeCompatibility.CategoryOf("NVARCHAR"));
         Assert.Equal(TypeCategory.Integer, TypeCompatibility.CategoryOf("BigInt"));
     }
+
+    [Fact]
+    public void Identical_unmapped_type_geography_to_geography_is_compatible()
+    {
+        var check = TypeCompatibility.Check(Source("geography"), Target("geography"));
+
+        Assert.True(check.Compatible);
+        Assert.False(check.Narrowing);
+    }
+
+    [Fact]
+    public void Identical_unmapped_type_hierarchyid_to_hierarchyid_is_compatible()
+    {
+        var check = TypeCompatibility.Check(Source("hierarchyid"), Target("hierarchyid"));
+
+        Assert.True(check.Compatible);
+        Assert.False(check.Narrowing);
+    }
+
+    [Fact]
+    public void Different_unmapped_types_are_still_incompatible()
+    {
+        var check = TypeCompatibility.Check(Source("geography"), Target("nvarchar", 50));
+
+        Assert.False(check.Compatible);
+    }
+
+    [Fact]
+    public void Narrowing_a_string_of_the_same_type_name_is_still_flagged()
+    {
+        var check = TypeCompatibility.Check(Source("nvarchar", 200), Target("nvarchar", 100));
+
+        Assert.True(check.Compatible);
+        Assert.True(check.Narrowing);
+    }
 }

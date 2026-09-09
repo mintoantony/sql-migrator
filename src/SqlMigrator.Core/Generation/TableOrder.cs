@@ -36,7 +36,7 @@ public static class TableOrder
             if (ready.Count == 0)
             {
                 ordered = [];
-                cycle = remaining.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+                cycle = PruneToCycle(remaining, parents);
                 return false;
             }
 
@@ -51,5 +51,37 @@ public static class TableOrder
         ordered = result;
         cycle = [];
         return true;
+    }
+
+    /// <summary>
+    /// Narrows a stalled remaining set down to the tables genuinely on a cycle. A table that no
+    /// other remaining table depends on cannot sit on a cycle — it's merely downstream of one —
+    /// so repeatedly strip such tables until a full pass removes nothing.
+    /// </summary>
+    private static IReadOnlyList<string> PruneToCycle(
+        IReadOnlyList<string> remaining,
+        IReadOnlyDictionary<string, HashSet<string>> parents)
+    {
+        var survivors = new HashSet<string>(remaining, StringComparer.OrdinalIgnoreCase);
+
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+            foreach (var table in survivors.ToList())
+            {
+                var dependedOn = survivors.Any(other =>
+                    !string.Equals(other, table, StringComparison.OrdinalIgnoreCase) &&
+                    parents[other].Contains(table));
+
+                if (!dependedOn)
+                {
+                    survivors.Remove(table);
+                    changed = true;
+                }
+            }
+        }
+
+        return survivors.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
     }
 }
