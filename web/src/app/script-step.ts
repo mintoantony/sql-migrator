@@ -1,6 +1,7 @@
 import { Component, inject, signal } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
 import { MigrationService } from './migration.service';
+import { describeError } from './http-error';
 
 @Component({
   selector: 'app-script-step',
@@ -15,6 +16,7 @@ import { MigrationService } from './migration.service';
         <button mat-stroked-button (click)="download(text)">Download .sql</button>
         <button mat-stroked-button (click)="save()">Save mapping XML</button>
         @if (savedPath(); as path) { <span>Saved to {{ path }}</span> }
+        @if (saveError(); as message) { <span class="error">{{ message }}</span> }
       </div>
       <pre>{{ text }}</pre>
     }
@@ -31,6 +33,7 @@ export class ScriptStep {
   readonly sql = signal<string | null>(null);
   readonly error = signal<string | null>(null);
   readonly savedPath = signal<string | null>(null);
+  readonly saveError = signal<string | null>(null);
 
   async ngOnInit() {
     try {
@@ -53,7 +56,12 @@ export class ScriptStep {
   }
 
   async save() {
-    const result = await this.service.saveMapping();
-    this.savedPath.set(result.path);
+    this.saveError.set(null);
+    try {
+      const result = await this.service.saveMapping();
+      this.savedPath.set(result.path);
+    } catch (err) {
+      this.saveError.set(describeError(err));
+    }
   }
 }

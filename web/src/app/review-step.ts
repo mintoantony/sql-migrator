@@ -8,6 +8,7 @@ import { MatInputModule } from '@angular/material/input';
 import { MatListModule } from '@angular/material/list';
 import { MigrationService } from './migration.service';
 import { ColumnMapping, TableMapping } from './models';
+import { describeError } from './http-error';
 
 const CONFIDENCE_THRESHOLD = 0.75;
 
@@ -71,6 +72,10 @@ const CONFIDENCE_THRESHOLD = 0.75;
       <p>{{ service.status()!.unmatchedSourceTables.join(', ') }}</p>
     }
 
+    @if (editError(); as message) {
+      <p class="error">{{ message }}</p>
+    }
+
     <button mat-flat-button [disabled]="!canGenerate()" (click)="generate.emit()">Generate script</button>
   `,
   styles: `
@@ -83,6 +88,7 @@ const CONFIDENCE_THRESHOLD = 0.75;
     .status.bad { color: var(--mat-sys-error); }
     .selected { background: var(--mat-sys-surface-variant); }
     .verdict { font-weight: 600; }
+    .error { color: var(--mat-sys-error); }
   `,
 })
 export class ReviewStep {
@@ -91,6 +97,7 @@ export class ReviewStep {
 
   private readonly manualAccepts = signal<Record<string, boolean>>({});
   readonly selected = signal<TableMapping | null>(this.service.mapping()?.tables?.[0] ?? null);
+  readonly editError = signal<string | null>(null);
 
   readonly canGenerate = computed(() => !this.service.hasBlocking());
 
@@ -124,13 +131,18 @@ export class ReviewStep {
   async edit(table: TableMapping, column: ColumnMapping, expression: string) {
     column.expression = expression;
     column.origin = 'human';
+    this.editError.set(null);
 
-    const result = await this.service.validateExpression(
-      table.sourceTable, table.targetTable, column.targetColumn, expression);
+    try {
+      const result = await this.service.validateExpression(
+        table.sourceTable, table.targetTable, column.targetColumn, expression);
 
-    const others = this.service.issues()
-      .filter(i => !(i.table === table.targetTable && i.column === column.targetColumn));
-    this.service.issues.set([...others, ...result.issues]);
+      const others = this.service.issues()
+        .filter(i => !(i.table === table.targetTable && i.column === column.targetColumn));
+      this.service.issues.set([...others, ...result.issues]);
+    } catch (err) {
+      this.editError.set(describeError(err));
+    }
   }
 
   private column(targetTable: string, targetColumn: string): ColumnMapping | undefined {

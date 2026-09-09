@@ -1,12 +1,15 @@
-import { Component, inject, output } from '@angular/core';
+import { Component, inject, output, signal } from '@angular/core';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MigrationService } from './migration.service';
+import { describeError } from './http-error';
 
 @Component({
   selector: 'app-analyse-step',
   imports: [MatProgressBarModule],
   template: `
-    @if (service.status(); as status) {
+    @if (pollError(); as message) {
+      <p class="error">{{ message }}</p>
+    } @else if (service.status(); as status) {
       @if (status.state === 'running') {
         <mat-progress-bar mode="indeterminate" />
         <p>{{ status.step ?? 'Working…' }}</p>
@@ -24,8 +27,14 @@ export class AnalyseStep {
   readonly service = inject(MigrationService);
   readonly finished = output<void>();
 
+  readonly pollError = signal<string | null>(null);
+
   async ngOnInit() {
-    const status = await this.service.pollUntilDone();
-    if (status.state === 'ready') this.finished.emit();
+    try {
+      const status = await this.service.pollUntilDone();
+      if (status.state === 'ready') this.finished.emit();
+    } catch (err) {
+      this.pollError.set(describeError(err));
+    }
   }
 }

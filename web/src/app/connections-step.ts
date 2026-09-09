@@ -5,6 +5,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MigrationService } from './migration.service';
 import { ConnectionRequest, ConnectionTestResponse } from './models';
+import { describeError } from './http-error';
 
 @Component({
   selector: 'app-connections-step',
@@ -37,6 +38,9 @@ import { ConnectionRequest, ConnectionTestResponse } from './models';
     </mat-form-field>
 
     <button mat-flat-button [disabled]="!bothTested()" (click)="start()">Analyse</button>
+    @if (startError(); as message) {
+      <p class="error">{{ message }}</p>
+    }
   `,
   styles: `
     .panels { display: flex; gap: 2rem; }
@@ -57,6 +61,7 @@ export class ConnectionsStep {
     target: { server: 'localhost', database: '' },
   });
   private readonly results = signal<Record<string, ConnectionTestResponse | undefined>>({});
+  readonly startError = signal<string | null>(null);
 
   server = (side: string) => this.connections()[side].server;
   database = (side: string) => this.connections()[side].database;
@@ -72,15 +77,27 @@ export class ConnectionsStep {
   }
 
   async test(side: string) {
-    const result = await this.service.testConnection(this.connections()[side]);
-    this.results.update(r => ({ ...r, [side]: result }));
+    try {
+      const result = await this.service.testConnection(this.connections()[side]);
+      this.results.update(r => ({ ...r, [side]: result }));
+    } catch (err) {
+      this.results.update(r => ({
+        ...r,
+        [side]: { ok: false, version: null, tableCount: 0, error: describeError(err) },
+      }));
+    }
   }
 
   bothTested = () => this.results()['source']?.ok === true && this.results()['target']?.ok === true;
 
   async start() {
-    const { source, target } = this.connections();
-    await this.service.analyse(source, target, this.sourceReference);
-    this.started.emit();
+    this.startError.set(null);
+    try {
+      const { source, target } = this.connections();
+      await this.service.analyse(source, target, this.sourceReference);
+      this.started.emit();
+    } catch (err) {
+      this.startError.set(describeError(err));
+    }
   }
 }
