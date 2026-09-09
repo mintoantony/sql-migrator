@@ -46,7 +46,15 @@ public sealed class SynchronizedList<T>
 /// the live session rather than a deep copy. The scalar fields (<see cref="State"/>,
 /// <see cref="Step"/>, <see cref="Error"/>, <see cref="Mapping"/>, schemas) are plain reference
 /// types reassigned as a whole, never mutated in place, and .NET guarantees reference
-/// assignment is atomic — so they carry no torn-read risk and need no extra locking.
+/// assignment is atomic — so no single one of them can be read half-written.
+///
+/// That is narrower than it sounds, and the difference matters. Atomic per field does NOT
+/// mean consistent across fields: nothing ties <see cref="State"/> to <see cref="Mapping"/>,
+/// so once a background writer exists a reader can observe the PAIR torn — State already
+/// "ready" while Mapping is still null. Today no such writer exists, which is the only
+/// reason this is currently safe. The task that introduces the background analysis must
+/// publish State and its payload together under one lock, or swap in a single immutable
+/// result object, rather than assigning the two fields separately.
 /// </summary>
 public sealed class Session
 {
