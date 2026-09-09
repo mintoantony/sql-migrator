@@ -9,7 +9,7 @@ public static class DemoMapping
         "dbo.Customer", "dbo.Client",
         [
             new ColumnMapping("ClientId",     RuleKind.Copy,     "CustomerId", Origin.Ai, 0.99),
-            new ColumnMapping("FullName",     RuleKind.Concat,   "CONCAT(FirstName, ' ', LastName)", Origin.Ai, 0.95),
+            new ColumnMapping("FullName",     RuleKind.Concat,   "LEFT(CONCAT(FirstName, ' ', LastName), 200)", Origin.Ai, 0.95),
             new ColumnMapping("ShortName",    RuleKind.Truncate, "LEFT(LastName, 20)", Origin.Ai, 0.9),
             new ColumnMapping("EmailAddress", RuleKind.Copy,     "Email", Origin.Ai, 0.98),
             new ColumnMapping("EmailDomain",  RuleKind.Split,    "SUBSTRING(Email, CHARINDEX('@', Email) + 1, 100)", Origin.Ai, 0.8),

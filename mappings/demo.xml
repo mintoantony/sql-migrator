@@ -4,7 +4,7 @@
   <table source="dbo.Customer" target="dbo.Client" origin="ai" confidence="0.96">
     <reason>Both hold one row per customer.</reason>
     <column target="ClientId" rule="copy" expression="CustomerId" origin="ai" confidence="0.99" />
-    <column target="FullName" rule="concat" expression="CONCAT(FirstName, ' ', LastName)" origin="ai" confidence="0.95" />
+    <column target="FullName" rule="concat" expression="LEFT(CONCAT(FirstName, ' ', LastName), 200)" origin="ai" confidence="0.95" />
     <column target="ShortName" rule="truncate" expression="LEFT(LastName, 20)" origin="ai" confidence="0.9" />
     <column target="EmailAddress" rule="copy" expression="Email" origin="ai" confidence="0.98" />
     <column target="EmailDomain" rule="split" expression="SUBSTRING(Email, CHARINDEX('@', Email) + 1, 100)" origin="ai" confidence="0.8" />

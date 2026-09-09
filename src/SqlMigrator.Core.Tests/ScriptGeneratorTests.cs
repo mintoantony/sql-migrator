@@ -93,14 +93,18 @@ public class ScriptGeneratorTests
     }
 
     [Fact]
-    public async Task Emits_expressions_and_the_source_reference_verbatim()
+    public async Task Emits_expressions_verbatim_and_a_validated_source_reference()
     {
+        // "Verbatim" applies to the expression only. The source reference is not passed
+        // through untouched — it is validated and re-quoted by SqlIdentifier.QuoteSourceReference
+        // (see the Source_reference_* tests below) — this well-formed, already-bracketed value
+        // just happens to re-quote to the same text.
         TestDatabases.EnsureCreated();
         var target = await SchemaReader.ReadAsync(TestDatabases.TargetConnectionString);
 
         var sql = ScriptGenerator.Generate(DemoMigrationMapping(), target, Options());
 
-        Assert.Contains("CONCAT(FirstName, ' ', LastName)", sql);
+        Assert.Contains("LEFT(CONCAT(FirstName, ' ', LastName), 200)", sql);
         Assert.Contains($"FROM [{TestDatabases.SourceDb}].[dbo].[Customer]", sql);
         Assert.Contains("-- Source: localhost . SqlMigratorDemo_Source", sql);
         Assert.Contains("3f9a0000", sql);
@@ -153,10 +157,12 @@ public class ScriptGeneratorTests
             ],
             []);
 
-    private static MigrationMapping SingleTableMapping(string sourceTable, string targetTable, string sourceColumn, string targetColumn) =>
+    private static MigrationMapping SingleTableMapping(
+        string sourceTable, string targetTable, string sourceColumn, string targetColumn,
+        string sourceReference = "[SourceDb]") =>
         new(
             "Injection", new DateTimeOffset(2026, 9, 9, 11, 14, 0, TimeSpan.Zero), "test-model",
-            "SourceDb", "[SourceDb]", "TestDb",
+            "SourceDb", sourceReference, "TestDb",
             [new TableMapping(
                 sourceTable, targetTable,
                 [new ColumnMapping(targetColumn, RuleKind.Copy, sourceColumn, Origin.Ai, 0.99)],
@@ -226,5 +232,162 @@ public class ScriptGeneratorTests
         // The naive (Trim-only) quoting this replaces would close the bracket right after
         // "Customer", leaving "; SELECT 1 AS Pwn --]" as live, uncommented script text.
         Assert.DoesNotContain("[dbo].[Customer]; SELECT 1 AS Pwn --]", sql);
+    }
+
+    // --- SourceReference: the fourth injection --------------------------------------------
+    // Unlike a table/column identifier, SourceReference is not free text — spec §2.5 fixes
+    // its shape as one or two bracket-quoted parts (a same-instance database, or
+    // [LinkedServer].[Database]). It used to be interpolated straight into the emitted FROM
+    // clause with no quoting, escaping or validation at any hop from the browser: the Angular
+    // UI auto-fills it from the source database name, so a database literally named
+    // "X]; DROP TABLE dbo.Invoices --" produced live DDL in a script the tool had just
+    // certified as validated. The fix rejects anything that is not exactly the legitimate
+    // shape, rather than trying to sanitise it.
+
+    [Theory]
+    [InlineData("[SqlMigratorDemo_Source]")]
+    [InlineData("[LINKEDSRV].[SqlMigratorDemo_Source]")]
+    public void Legitimate_source_reference_forms_are_emitted_quoted(string sourceReference)
+    {
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = SingleTableMapping("dbo.Src", "dbo.Tbl", "SrcCol", "Col", sourceReference);
+
+        var sql = ScriptGenerator.Generate(mapping, schema, Options());
+
+        Assert.Contains($"FROM {sourceReference}.[dbo].[Src];", sql);
+    }
+
+    [Fact]
+    public void SourceReference_containing_a_closing_bracket_is_refused_before_any_sql_is_built()
+    {
+        // The exact C1 payload: an interior ']' followed by a second statement, closed with a
+        // trailing ']' so it still looks superficially well-formed.
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = SingleTableMapping("dbo.Src", "dbo.Tbl", "SrcCol", "Col",
+            sourceReference: "[X]; DROP TABLE dbo.Invoices --]");
+
+        var ex = Assert.Throws<ScriptGenerationException>(
+            () => ScriptGenerator.Generate(mapping, schema, Options()));
+        Assert.Contains("source reference", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SourceReference_containing_an_unbracketed_single_quote_is_refused()
+    {
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = SingleTableMapping("dbo.Src", "dbo.Tbl", "SrcCol", "Col",
+            sourceReference: "O'Brien'; DROP TABLE dbo.Invoices --");
+
+        Assert.Throws<ScriptGenerationException>(
+            () => ScriptGenerator.Generate(mapping, schema, Options()));
+    }
+
+    [Fact]
+    public void SourceReference_with_a_trailing_drop_table_statement_is_refused()
+    {
+        // A well-formed bracket-quoted part is not enough on its own: trailing text after the
+        // closing bracket must also be refused, not silently dropped or accepted.
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = SingleTableMapping("dbo.Src", "dbo.Tbl", "SrcCol", "Col",
+            sourceReference: "[SqlMigratorDemo_Source]; DROP TABLE dbo.Invoices --");
+
+        Assert.Throws<ScriptGenerationException>(
+            () => ScriptGenerator.Generate(mapping, schema, Options()));
+    }
+
+    // --- Script header comments: the fifth injection (C2) ---------------------------------
+    // SourceDatabase, TargetDatabase and Model are free text — SourceDatabase/TargetDatabase
+    // can come straight off the request body or off a live server's database name, and Model
+    // off a language model's self-reported name — and used to be interpolated raw into "--"
+    // header comment lines. A "--" comment ends at the first CR or LF, so a value containing
+    // either one could close the comment and let the rest of its own text run as a live
+    // statement, above BEGIN TRANSACTION, before the script's own safety net even starts. The
+    // fix strips CR/LF via SqlComment.Sanitize; these tests assert on the emitted text that a
+    // payload can no longer start a new line, let alone one above BEGIN TRANSACTION.
+
+    private static void AssertNoLiveLineAboveTransaction(string sql)
+    {
+        var beginTransaction = sql.IndexOf("BEGIN TRANSACTION;", StringComparison.Ordinal);
+        Assert.True(beginTransaction > 0, "Script must contain BEGIN TRANSACTION;");
+
+        // Split on CR *and* LF, not LF alone. SQL Server ends a "--" comment at either one, so a
+        // bare-CR payload is exactly as dangerous as an LF one — but splitting only on '\n' folds
+        // it into a single line that still begins with "--", and every assertion below passes.
+        // A review demonstrated this: with \r stripping removed from Sanitize, the CRLF payload
+        // these tests already carry produced a header whose DROP TABLE genuinely executed on the
+        // server while the suite stayed green. A regression test blind to half the regression is
+        // worse than none, because it reports safety it has not checked.
+        foreach (var line in sql[..beginTransaction].Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            Assert.True(
+                line.Length == 0 || line.StartsWith("--", StringComparison.Ordinal)
+                    || line is "SET XACT_ABORT ON;",
+                $"Line above BEGIN TRANSACTION must be blank, a comment, or the XACT_ABORT setup — was: {line}");
+        }
+    }
+
+    [Theory]
+    [InlineData("SqlMigratorDemo_Source\nDROP TABLE dbo.Invoices;--")]
+    [InlineData("SqlMigratorDemo_Source\r\nDROP TABLE dbo.Invoices;--")]
+    [InlineData("SqlMigratorDemo_Source\rDROP TABLE dbo.Invoices;--")]  // bare CR ends a -- comment exactly as LF does
+    [InlineData("SqlMigratorDemo_Source\nDROP TABLE dbo.Invoices;--\n")]
+    public void A_newline_in_SourceDatabase_cannot_start_a_line_above_the_transaction(string payload)
+    {
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = new MigrationMapping(
+            "Injection", new DateTimeOffset(2026, 9, 9, 11, 14, 0, TimeSpan.Zero), "test-model",
+            payload, "[SourceDb]", "TestDb",
+            [new TableMapping(
+                "dbo.Src", "dbo.Tbl",
+                [new ColumnMapping("Col", RuleKind.Copy, "SrcCol", Origin.Ai, 0.99)],
+                [], Origin.Ai, 0.99, "test")]);
+
+        var sql = ScriptGenerator.Generate(mapping, schema, Options());
+
+        Assert.DoesNotContain("\nDROP TABLE", sql);
+        AssertNoLiveLineAboveTransaction(sql);
+    }
+
+    [Theory]
+    [InlineData("TestDb\nDROP TABLE dbo.Invoices;--")]
+    [InlineData("TestDb\r\nDROP TABLE dbo.Invoices;--")]
+    [InlineData("TestDb\rDROP TABLE dbo.Invoices;--")]
+    public void A_newline_in_TargetDatabase_cannot_start_a_line_above_the_transaction(string payload)
+    {
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = new MigrationMapping(
+            "Injection", new DateTimeOffset(2026, 9, 9, 11, 14, 0, TimeSpan.Zero), "test-model",
+            "SourceDb", "[SourceDb]", payload,
+            [new TableMapping(
+                "dbo.Src", "dbo.Tbl",
+                [new ColumnMapping("Col", RuleKind.Copy, "SrcCol", Origin.Ai, 0.99)],
+                [], Origin.Ai, 0.99, "test")]);
+
+        var sql = ScriptGenerator.Generate(mapping, schema, Options());
+
+        Assert.DoesNotContain("\nDROP TABLE", sql);
+        AssertNoLiveLineAboveTransaction(sql);
+    }
+
+    [Theory]
+    [InlineData("test-model\nDROP TABLE dbo.Invoices;--")]
+    [InlineData("test-model\r\nDROP TABLE dbo.Invoices;--")]
+    [InlineData("test-model\rDROP TABLE dbo.Invoices;--")]
+    public void A_newline_in_Model_cannot_start_a_line_above_the_transaction(string payload)
+    {
+        var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
+        var mapping = new MigrationMapping(
+            "Injection", new DateTimeOffset(2026, 9, 9, 11, 14, 0, TimeSpan.Zero), payload,
+            "SourceDb", "[SourceDb]", "TestDb",
+            [new TableMapping(
+                "dbo.Src", "dbo.Tbl",
+                [new ColumnMapping("Col", RuleKind.Copy, "SrcCol", Origin.Ai, 0.99)],
+                [], Origin.Ai, 0.99, "test")]);
+
+        var sql = ScriptGenerator.Generate(mapping, schema, Options());
+
+        Assert.DoesNotContain("\nDROP TABLE", sql);
+        Assert.Contains("-- Mapping proposed by: test-modelDROP TABLE dbo.Invoices;--", sql);
+        AssertNoLiveLineAboveTransaction(sql);
     }
 }

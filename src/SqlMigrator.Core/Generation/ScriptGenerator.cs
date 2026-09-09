@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using SqlMigrator.Core.Sql;
 using SqlMigrator.Model.Mapping;
 using SqlMigrator.Model.Schema;
 
@@ -18,6 +19,21 @@ public static class ScriptGenerator
 {
     public static string Generate(MigrationMapping mapping, DbSchema targetSchema, ScriptOptions options)
     {
+        // Reject an invalid source reference as early as possible — before touching the
+        // table order, the target schema, or any per-table work — rather than letting it
+        // reach the emitted script unvalidated. It cannot simply be bracket-quoted like an
+        // ordinary identifier; QuoteSourceReference both validates its shape and re-quotes it.
+        string quotedSourceReference;
+        try
+        {
+            quotedSourceReference = SqlIdentifier.QuoteSourceReference(mapping.SourceReference);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new ScriptGenerationException(
+                $"Mapping's source reference is invalid: {ex.Message}");
+        }
+
         var targetTables = mapping.Tables.Select(t => t.TargetTable).ToList();
 
         if (!TableOrder.TrySort(targetTables, targetSchema.ForeignKeys, out var ordered, out var cycle))
@@ -30,10 +46,24 @@ public static class ScriptGenerator
         var byTarget = mapping.Tables.ToDictionary(t => t.TargetTable, StringComparer.OrdinalIgnoreCase);
         var sb = new StringBuilder();
 
-        sb.AppendLine($"-- Generated {options.GeneratedUtc.UtcDateTime:yyyy-MM-ddTHH:mmZ} from {options.MappingFileName} (sha256 {options.MappingSha256})");
-        sb.AppendLine($"-- Source: {options.SourceServer} . {mapping.SourceDatabase}");
-        sb.AppendLine($"-- Target: {options.TargetServer} . {mapping.TargetDatabase}");
-        if (mapping.Model is not null) sb.AppendLine($"-- Mapping proposed by: {mapping.Model}");
+        // Every value below is free text — from the request body, or a linked-server database
+        // name read off a live server — and lands in a "--" comment line. A "--" comment ends
+        // at the first CR or LF, so an un-sanitized value could close the comment early and let
+        // whatever follows run as a live statement in the header, above BEGIN TRANSACTION.
+        // SqlComment.Sanitize is the only thing between that and this text: route every value
+        // that reaches a comment line through it, not just the ones an attacker is likeliest
+        // to control.
+        var mappingFileName = SqlComment.Sanitize(options.MappingFileName);
+        var mappingSha256 = SqlComment.Sanitize(options.MappingSha256);
+        var sourceServer = SqlComment.Sanitize(options.SourceServer);
+        var targetServer = SqlComment.Sanitize(options.TargetServer);
+        var sourceDatabase = SqlComment.Sanitize(mapping.SourceDatabase);
+        var targetDatabase = SqlComment.Sanitize(mapping.TargetDatabase);
+
+        sb.AppendLine($"-- Generated {options.GeneratedUtc.UtcDateTime:yyyy-MM-ddTHH:mmZ} from {mappingFileName} (sha256 {mappingSha256})");
+        sb.AppendLine($"-- Source: {sourceServer} . {sourceDatabase}");
+        sb.AppendLine($"-- Target: {targetServer} . {targetDatabase}");
+        if (mapping.Model is not null) sb.AppendLine($"-- Mapping proposed by: {SqlComment.Sanitize(mapping.Model)}");
         sb.AppendLine("-- Review before running. This script inserts data.");
         sb.AppendLine();
         sb.AppendLine("SET XACT_ABORT ON;");
@@ -42,7 +72,7 @@ public static class ScriptGenerator
 
         foreach (var targetName in ordered)
         {
-            AppendTable(sb, byTarget[targetName], targetSchema, mapping.SourceReference);
+            AppendTable(sb, byTarget[targetName], targetSchema, quotedSourceReference);
             sb.AppendLine();
         }
 
@@ -51,13 +81,13 @@ public static class ScriptGenerator
     }
 
     private static void AppendTable(
-        StringBuilder sb, TableMapping table, DbSchema targetSchema, string sourceReference)
+        StringBuilder sb, TableMapping table, DbSchema targetSchema, string quotedSourceReference)
     {
         var targetTable = targetSchema.Find(table.TargetTable)
             ?? throw new ScriptGenerationException($"Target table {table.TargetTable} is not in the target schema.");
 
         var quotedTarget = Quote(table.TargetTable);
-        var escapedTargetName = EscapeLiteral(table.TargetTable);
+        var escapedTargetName = SqlLiteral.Escape(table.TargetTable);
         var usesIdentity = targetTable.Columns.Any(c => c.IsIdentity && table.Columns.Any(m =>
             string.Equals(m.TargetColumn, c.Name, StringComparison.OrdinalIgnoreCase)));
 
@@ -67,12 +97,12 @@ public static class ScriptGenerator
             $"    THROW 50001, 'Target table {escapedTargetName} is not empty. Keys are preserved, so a rerun would collide.', 1;");
         sb.AppendLine();
 
-        var columnList = string.Join(", ", table.Columns.Select(c => QuoteIdentifier(c.TargetColumn)));
+        var columnList = string.Join(", ", table.Columns.Select(c => SqlIdentifier.QuoteIdentifier(c.TargetColumn)));
         var insertLines = new[]
             {
                 $"INSERT INTO {quotedTarget} ({columnList})",
                 "SELECT " + string.Join(",\n       ", table.Columns.Select(c => c.Expression)),
-                $"FROM {sourceReference}.{Quote(table.SourceTable)};",
+                $"FROM {quotedSourceReference}.{Quote(table.SourceTable)};",
             };
 
         if (usesIdentity)
@@ -98,32 +128,11 @@ public static class ScriptGenerator
         sb.AppendLine($"PRINT CONCAT('{escapedTargetName}: ', @@ROWCOUNT, ' rows');");
     }
 
-    private static string Quote(string fullName)
-    {
-        var parts = fullName.Split('.', 2);
-        return parts.Length == 2
-            ? $"{QuoteIdentifier(parts[0])}.{QuoteIdentifier(parts[1])}"
-            : $"{QuoteIdentifier("dbo")}.{QuoteIdentifier(fullName)}";
-    }
-
     /// <summary>
-    /// Quotes a single T-SQL identifier. Strips at most one matched pair of surrounding
-    /// brackets (so a caller-supplied "[Name]" is not double-bracketed), then escapes every
-    /// remaining ']' by doubling it, per the T-SQL rule for bracket-quoted identifiers. This is
-    /// the only place identifier quoting happens; every identifier the generator emits must
-    /// route through here (directly, or via <see cref="Quote"/>).
+    /// Quotes a two-part (schema.table) or one-part (defaults to dbo) SQL name. Delegates to
+    /// <see cref="SqlIdentifier"/>, the one place in the solution that owns identifier-quoting
+    /// logic — every identifier the generator emits routes through there, directly or via this
+    /// method.
     /// </summary>
-    private static string QuoteIdentifier(string identifier)
-    {
-        var name = identifier;
-        if (name.Length >= 2 && name[0] == '[' && name[^1] == ']')
-        {
-            name = name[1..^1];
-        }
-
-        return $"[{name.Replace("]", "]]")}]";
-    }
-
-    /// <summary>Escapes a value for embedding inside a single-quoted T-SQL string literal.</summary>
-    private static string EscapeLiteral(string value) => value.Replace("'", "''");
+    private static string Quote(string fullName) => SqlIdentifier.Quote(fullName);
 }

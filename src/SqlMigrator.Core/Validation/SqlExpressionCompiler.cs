@@ -1,5 +1,6 @@
 using System.Data;
 using Microsoft.Data.SqlClient;
+using SqlMigrator.Core.Sql;
 
 namespace SqlMigrator.Core.Validation;
 
@@ -58,39 +59,9 @@ public sealed class SqlExpressionCompiler(string sourceConnectionString) : IExpr
     }
 
     /// <summary>
-    /// Turns dbo.Order into [dbo].[Order] so reserved words survive.
-    /// The table name is structural, so it cannot be passed as a parameter — it is
-    /// interpolated into the command text. That makes this escaping the only thing
-    /// between a caller-supplied name and arbitrary SQL, so it follows the T-SQL rule
-    /// exactly: a ] inside a bracket-quoted identifier is escaped by doubling it.
+    /// Turns dbo.Order into [dbo].[Order] so reserved words survive. Delegates to
+    /// <see cref="SqlIdentifier.Quote"/>, the one place in the solution that owns
+    /// identifier-quoting logic.
     /// </summary>
-    internal static string Quote(string fullName)
-    {
-        if (string.IsNullOrWhiteSpace(fullName))
-            throw new ArgumentException("Table name must not be empty.", nameof(fullName));
-
-        var parts = fullName.Split('.', 2);
-        var schema = parts.Length == 2 ? parts[0] : "dbo";
-        var table = parts.Length == 2 ? parts[1] : fullName;
-
-        return $"{QuoteIdentifier(schema, nameof(fullName))}.{QuoteIdentifier(table, nameof(fullName))}";
-    }
-
-    /// <summary>
-    /// Wraps one identifier in brackets, doubling any ] it contains. Trimming the
-    /// brackets off an already-quoted name is not enough on its own: Customer]; DROP
-    /// would survive a trim and close the identifier early.
-    /// </summary>
-    private static string QuoteIdentifier(string part, string paramName)
-    {
-        var bare = part.Trim();
-
-        if (bare.Length >= 2 && bare[0] == '[' && bare[^1] == ']')
-            bare = bare[1..^1];
-
-        if (string.IsNullOrWhiteSpace(bare))
-            throw new ArgumentException($"Table name part '{part}' is empty.", paramName);
-
-        return $"[{bare.Replace("]", "]]")}]";
-    }
+    internal static string Quote(string fullName) => SqlIdentifier.Quote(fullName);
 }
