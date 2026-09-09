@@ -62,4 +62,30 @@ public class TableOrderTests
         Assert.Contains("dbo.A", cycle);
         Assert.Contains("dbo.B", cycle);
     }
+
+    [Fact]
+    public void A_table_only_downstream_of_a_cycle_is_excluded_from_the_report()
+    {
+        string[] tables = ["dbo.A", "dbo.B", "dbo.C"];
+        ForeignKeyInfo[] keys = [Fk("A", "B"), Fk("B", "A"), Fk("C", "A")];
+
+        Assert.False(TableOrder.TrySort(tables, keys, out _, out var cycle));
+
+        Assert.Contains("dbo.A", cycle);
+        Assert.Contains("dbo.B", cycle);
+        Assert.DoesNotContain("dbo.C", cycle);
+    }
+
+    [Fact]
+    public void A_three_table_cycle_reports_all_three_tables()
+    {
+        string[] tables = ["dbo.A", "dbo.B", "dbo.C"];
+        ForeignKeyInfo[] keys = [Fk("A", "B"), Fk("B", "C"), Fk("C", "A")];
+
+        Assert.False(TableOrder.TrySort(tables, keys, out _, out var cycle));
+
+        Assert.Contains("dbo.A", cycle);
+        Assert.Contains("dbo.B", cycle);
+        Assert.Contains("dbo.C", cycle);
+    }
 }
