@@ -4,7 +4,7 @@ using System.Xml;
 using System.Xml.Linq;
 using System.Xml.Schema;
 
-namespace SqlMigrator.Core.Mapping;
+namespace SqlMigrator.Model.Mapping;
 
 public sealed class MappingXmlException(string message) : Exception(message);
 

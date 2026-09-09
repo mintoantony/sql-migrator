@@ -1,4 +1,4 @@
-using SqlMigrator.Core.Mapping;
+using SqlMigrator.Model.Mapping;
 
 namespace SqlMigrator.Core.Tests;
 

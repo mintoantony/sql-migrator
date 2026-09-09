@@ -1,4 +1,5 @@
 using Microsoft.Data.SqlClient;
+using SqlMigrator.Model.Schema;
 
 namespace SqlMigrator.Core.Schema;
 
