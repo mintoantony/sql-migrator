@@ -10,8 +10,6 @@ import { MigrationService } from './migration.service';
 import { ColumnMapping, TableMapping } from './models';
 import { describeError } from './http-error';
 
-const CONFIDENCE_THRESHOLD = 0.75;
-
 @Component({
   selector: 'app-review-step',
   imports: [FormsModule, MatButtonModule, MatCheckboxModule, MatChipsModule,
@@ -95,7 +93,6 @@ export class ReviewStep {
   readonly service = inject(MigrationService);
   readonly generate = output<void>();
 
-  private readonly manualAccepts = signal<Record<string, boolean>>({});
   readonly selected = signal<TableMapping | null>(this.service.mapping()?.tables?.[0] ?? null);
   readonly editError = signal<string | null>(null);
 
@@ -107,20 +104,16 @@ export class ReviewStep {
     return value === null ? '—' : `${Math.round(value * 100)}%`;
   }
 
-  /** High-confidence proposals arrive accepted; anything below needs a deliberate click. */
+  /**
+   * The accept state governs what actually reaches the saved mapping and the generated script
+   * — see MigrationService.mappingToSubmit. This component only renders it and lets it be toggled.
+   */
   accepted(targetTable: string, targetColumn: string): boolean {
-    const key = `${targetTable}.${targetColumn}`;
-    const manual = this.manualAccepts()[key];
-    if (manual !== undefined) return manual;
-
-    const column = this.column(targetTable, targetColumn);
-    return (column?.confidence ?? 0) >= CONFIDENCE_THRESHOLD;
+    return this.service.accepted(targetTable, targetColumn);
   }
 
   toggle(targetTable: string, targetColumn: string) {
-    const key = `${targetTable}.${targetColumn}`;
-    const current = this.accepted(targetTable, targetColumn);
-    this.manualAccepts.update(a => ({ ...a, [key]: !current }));
+    this.service.toggleAccepted(targetTable, targetColumn);
   }
 
   issueFor(targetTable: string, targetColumn: string) {
@@ -167,11 +160,5 @@ export class ReviewStep {
     if (updatedTable && this.selected()?.targetTable === targetTable) {
       this.selected.set(updatedTable);
     }
-  }
-
-  private column(targetTable: string, targetColumn: string): ColumnMapping | undefined {
-    return this.service.mapping()?.tables
-      .find(t => t.targetTable === targetTable)?.columns
-      .find(c => c.targetColumn === targetColumn);
   }
 }

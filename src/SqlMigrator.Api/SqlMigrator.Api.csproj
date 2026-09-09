@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -11,14 +11,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\SqlMigrator.Core\SqlMigrator.Core.csproj" />
+    <ProjectReference Include="..\SqlMigrator.Ai\SqlMigrator.Ai.csproj" />
     <ProjectReference Include="..\SqlMigrator.Model\SqlMigrator.Model.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <!-- Identifier quoting is an implementation detail, but it is the only barrier
-         between a caller-supplied table name and the command text, so it is tested
-         directly rather than only through a live database round-trip. -->
-    <InternalsVisibleTo Include="SqlMigrator.Core.Tests" />
   </ItemGroup>
 
 </Project>

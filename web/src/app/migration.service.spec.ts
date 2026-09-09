@@ -5,8 +5,26 @@ import { MigrationService } from './migration.service';
 import { Mapping, SessionStatus } from './models';
 
 function runningStatus(step: string): SessionStatus {
-  return { state: 'running', step, mapping: null, issues: [], failures: [], unmatchedSourceTables: [], error: null };
+  return {
+    state: 'running', step, mapping: null, issues: [], failures: [], unmatchedSourceTables: [],
+    error: null, confidenceThreshold: 0.75,
+  };
 }
+
+// Both columns start at or above the 0.75 default threshold, so both arrive pre-accepted —
+// isolating the accept/reject tests below to the effect of an explicit toggle rather than
+// also exercising the separate "starts unaccepted below threshold" behaviour.
+const reviewMapping: Mapping = {
+  name: 'Demo', model: 'test', sourceDatabase: 'S', sourceReference: '[S]', targetDatabase: 'T',
+  tables: [{
+    sourceTable: 'dbo.Customer', targetTable: 'dbo.Client', origin: 'ai', confidence: 0.96, reason: 'Customers.',
+    columns: [
+      { targetColumn: 'ClientId', rule: 'copy', expression: 'CustomerId', origin: 'ai', confidence: 0.99, reason: 'Key.' },
+      { targetColumn: 'FullName', rule: 'concat', expression: "CONCAT(FirstName, ' ', LastName)", origin: 'ai', confidence: 0.9, reason: 'Two parts.' },
+    ],
+    unmapped: [{ targetColumn: 'Notes', reason: 'No source column.' }],
+  }],
+};
 
 describe('MigrationService', () => {
   let service: MigrationService;
@@ -78,12 +96,15 @@ describe('MigrationService', () => {
 
       http.expectOne('/api/analyse/sess-1').flush({
         state: 'ready', step: null, mapping, issues: [], failures: [], unmatchedSourceTables: [], error: null,
+        confidenceThreshold: 0.8,
       });
 
       const status = await promise;
       expect(status.state).toBe('ready');
       expect(service.mapping()).toEqual(mapping);
       expect(service.status()?.state).toBe('ready');
+      // The server-configured threshold, not a client-side default, drives the review grid.
+      expect(service.confidenceThreshold()).toBe(0.8);
     });
 
     it('polls while running, then resolves with the failure reason once failed', async () => {
@@ -120,6 +141,71 @@ describe('MigrationService', () => {
       http.expectOne('/api/analyse/sess-3').flush('Internal error', { status: 500, statusText: 'Server Error' });
 
       await expect(promise).rejects.toBeInstanceOf(HttpErrorResponse);
+    });
+  });
+
+  describe('accept/reject governs what is submitted', () => {
+    beforeEach(() => {
+      service.sessionId.set('sess-review');
+      service.mapping.set(reviewMapping);
+      service.confidenceThreshold.set(0.75);
+    });
+
+    it('unticking a proposal removes it from the mapping sent to the server', async () => {
+      // ClientId (confidence 0.99) is accepted by default until unticked.
+      service.toggleAccepted('dbo.Client', 'ClientId');
+
+      const promise = service.generateScript();
+      const request = http.expectOne('/api/script/generate');
+      const table = (request.request.body as { mapping: Mapping }).mapping.tables[0];
+
+      expect(table.columns.map(c => c.targetColumn)).toEqual(['FullName']);
+      expect(table.unmapped).toContainEqual({ targetColumn: 'ClientId', reason: 'Rejected in review.' });
+
+      request.flush({ sql: '', issues: [] });
+      await promise;
+    });
+
+    it('re-ticking a proposal restores it to the mapping sent to the server', async () => {
+      service.toggleAccepted('dbo.Client', 'ClientId');
+      service.toggleAccepted('dbo.Client', 'ClientId');
+
+      const promise = service.generateScript();
+      const request = http.expectOne('/api/script/generate');
+      const table = (request.request.body as { mapping: Mapping }).mapping.tables[0];
+
+      expect(table.columns.map(c => c.targetColumn)).toEqual(['ClientId', 'FullName']);
+      expect(table.unmapped).toEqual([{ targetColumn: 'Notes', reason: 'No source column.' }]);
+
+      request.flush({ sql: '', issues: [] });
+      await promise;
+    });
+
+    it('also drops an unticked proposal from the mapping XML save request', async () => {
+      service.toggleAccepted('dbo.Client', 'ClientId');
+
+      const promise = service.saveMapping();
+      const request = http.expectOne('/api/mapping/save');
+      const table = (request.request.body as { mapping: Mapping }).mapping.tables[0];
+
+      expect(table.columns.map(c => c.targetColumn)).toEqual(['FullName']);
+
+      request.flush({ path: 'p', sha256: 'x'.repeat(64) });
+      await promise;
+    });
+
+    it('a proposal left unaccepted below the confidence threshold is also dropped, never ticked', async () => {
+      service.confidenceThreshold.set(0.95); // now only ClientId (0.99) clears the bar by default
+
+      const promise = service.generateScript();
+      const request = http.expectOne('/api/script/generate');
+      const table = (request.request.body as { mapping: Mapping }).mapping.tables[0];
+
+      expect(table.columns.map(c => c.targetColumn)).toEqual(['ClientId']);
+      expect(table.unmapped).toContainEqual({ targetColumn: 'FullName', reason: 'Rejected in review.' });
+
+      request.flush({ sql: '', issues: [] });
+      await promise;
     });
   });
 });

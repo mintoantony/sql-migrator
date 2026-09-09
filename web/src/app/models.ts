@@ -43,6 +43,8 @@ export interface SessionStatus {
   failures: string[];
   unmatchedSourceTables: string[];
   error: string | null;
+  /** Server-configured Ai:ConfidenceThreshold — the review grid's pre-accept cutoff. */
+  confidenceThreshold: number;
 }
 
 export interface ValidateExpressionResponse { ok: boolean; resultType: string | null; issues: Issue[]; }
