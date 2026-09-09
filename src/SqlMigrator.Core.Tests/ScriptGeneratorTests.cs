@@ -310,19 +310,26 @@ public class ScriptGeneratorTests
         var beginTransaction = sql.IndexOf("BEGIN TRANSACTION;", StringComparison.Ordinal);
         Assert.True(beginTransaction > 0, "Script must contain BEGIN TRANSACTION;");
 
-        foreach (var line in sql[..beginTransaction].Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        // Split on CR *and* LF, not LF alone. SQL Server ends a "--" comment at either one, so a
+        // bare-CR payload is exactly as dangerous as an LF one — but splitting only on '\n' folds
+        // it into a single line that still begins with "--", and every assertion below passes.
+        // A review demonstrated this: with \r stripping removed from Sanitize, the CRLF payload
+        // these tests already carry produced a header whose DROP TABLE genuinely executed on the
+        // server while the suite stayed green. A regression test blind to half the regression is
+        // worse than none, because it reports safety it has not checked.
+        foreach (var line in sql[..beginTransaction].Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
         {
-            var trimmed = line.TrimEnd('\r');
             Assert.True(
-                trimmed.Length == 0 || trimmed.StartsWith("--", StringComparison.Ordinal)
-                    || trimmed is "SET XACT_ABORT ON;",
-                $"Line above BEGIN TRANSACTION must be blank, a comment, or the XACT_ABORT setup — was: {trimmed}");
+                line.Length == 0 || line.StartsWith("--", StringComparison.Ordinal)
+                    || line is "SET XACT_ABORT ON;",
+                $"Line above BEGIN TRANSACTION must be blank, a comment, or the XACT_ABORT setup — was: {line}");
         }
     }
 
     [Theory]
     [InlineData("SqlMigratorDemo_Source\nDROP TABLE dbo.Invoices;--")]
     [InlineData("SqlMigratorDemo_Source\r\nDROP TABLE dbo.Invoices;--")]
+    [InlineData("SqlMigratorDemo_Source\rDROP TABLE dbo.Invoices;--")]  // bare CR ends a -- comment exactly as LF does
     [InlineData("SqlMigratorDemo_Source\nDROP TABLE dbo.Invoices;--\n")]
     public void A_newline_in_SourceDatabase_cannot_start_a_line_above_the_transaction(string payload)
     {
@@ -344,6 +351,7 @@ public class ScriptGeneratorTests
     [Theory]
     [InlineData("TestDb\nDROP TABLE dbo.Invoices;--")]
     [InlineData("TestDb\r\nDROP TABLE dbo.Invoices;--")]
+    [InlineData("TestDb\rDROP TABLE dbo.Invoices;--")]
     public void A_newline_in_TargetDatabase_cannot_start_a_line_above_the_transaction(string payload)
     {
         var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);
@@ -364,6 +372,7 @@ public class ScriptGeneratorTests
     [Theory]
     [InlineData("test-model\nDROP TABLE dbo.Invoices;--")]
     [InlineData("test-model\r\nDROP TABLE dbo.Invoices;--")]
+    [InlineData("test-model\rDROP TABLE dbo.Invoices;--")]
     public void A_newline_in_Model_cannot_start_a_line_above_the_transaction(string payload)
     {
         var schema = SingleTableSchema("dbo", "Tbl", "Col", identity: false);

@@ -3,10 +3,18 @@ using System.Text.RegularExpressions;
 namespace SqlMigrator.Core.Sql;
 
 /// <summary>
-/// Quotes T-SQL identifiers. This is the only place identifier quoting happens in the
-/// solution; every identifier that reaches generated SQL text or a compiled expression
-/// (directly, or via <see cref="Quote"/> / <see cref="QuoteSourceReference"/>) must route
-/// through here. A name is structural, so it cannot be passed as a parameter — it is
+/// Quotes T-SQL identifiers. Every identifier the generator itself emits — table names,
+/// column names, the source reference — routes through here, directly or via
+/// <see cref="Quote"/> / <see cref="QuoteSourceReference"/>.
+/// <para>
+/// It does NOT cover identifiers that appear inside a model-authored expression, such as the
+/// brackets in <c>LEFT([Last Name], 20)</c>. Those arrive already written and are guarded by
+/// <c>ExpressionScreen</c> plus a real compile against SQL Server, not by this class. The
+/// earlier wording claimed every identifier reaching generated SQL routed through here; that
+/// was false in two ways at once, and a false claim of coverage is how the last two injections
+/// stayed hidden — a reader who believes it stops looking.
+/// </para>
+/// A name is structural, so it cannot be passed as a parameter — it is
 /// interpolated into command text. That makes this escaping the only thing between a
 /// caller-supplied name and arbitrary SQL, so it follows the T-SQL rule exactly: a ] inside
 /// a bracket-quoted identifier is escaped by doubling it.
