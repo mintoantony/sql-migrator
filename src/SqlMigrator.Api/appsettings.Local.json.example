@@ -1,9 +1,22 @@
 {
   "Ai": {
+    "Provider": "OpenAi",
     "BaseUrl": "https://integrate.api.nvidia.com/v1",
     "Model": "<model id from the NIM catalogue>",
     "ApiKey": "<or set NVIDIA_API_KEY instead — preferred>",
     "ConfidenceThreshold": 0.75,
     "ColumnBatchSize": 5
+  },
+
+  "_ollama_instead": {
+    "Ai": {
+      "Provider": "Ollama",
+      "BaseUrl": "http://localhost:11434",
+      "Model": "<a model from `ollama list`, e.g. qwen2.5-coder:7b>",
+      "ContextLength": 8192,
+      "TimeoutSeconds": 600,
+      "ColumnBatchSize": 2,
+      "ConfidenceThreshold": 0.75
+    }
   }
 }

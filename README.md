@@ -12,7 +12,8 @@ database, takes your corrections, and generates a T-SQL migration script.
 - .NET 10 SDK
 - Node 22+ and the Angular CLI
 - SQL Server reachable with Windows authentication
-- An NVIDIA NIM API key, or any OpenAI-compatible endpoint
+- A model: an NVIDIA NIM API key, any OpenAI-compatible endpoint, or a local
+  [Ollama](https://ollama.com)
 
 ## Setup
 
@@ -32,6 +33,44 @@ dotnet run --project src/SqlMigrator.Api
 ```
 
 Open <http://127.0.0.1:5199>.
+
+### Running on a local model with Ollama
+
+Nothing leaves your machine, and no API key is needed:
+
+```bash
+ollama pull qwen2.5-coder:7b     # or any model that follows instructions and emits JSON
+```
+
+`src/SqlMigrator.Api/appsettings.Local.json`:
+
+```json
+{
+  "Ai": {
+    "Provider": "Ollama",
+    "Model": "qwen2.5-coder:7b",
+    "ColumnBatchSize": 2
+  }
+}
+```
+
+The committed `src/SqlMigrator.Api/appsettings.json` already ships this Ollama configuration
+(with `qwen2.5-coder:7b`); `appsettings.Local.json` overrides any of it, so an `Ai` block there — the
+NIM example, say — wins over Ollama.
+
+`BaseUrl` defaults to `http://localhost:11434` and `TimeoutSeconds` to `600` for Ollama.
+`NVIDIA_API_KEY` is never sent to Ollama, even if it is set.
+
+The app talks Ollama's native `/api/chat`, not its OpenAI-compatible `/v1`, because only the
+native API lets a request set the context window. Ollama's default window is small, and a prompt
+that overflows it is **truncated without an error**. The model would then quietly map only part
+of a schema. `Ai:ContextLength` (default `8192`) is sent with every call. If a run fails with
+*"ran out of context"*, raise it, or lower `ColumnBatchSize`.
+
+Model choice matters far more locally than it does on NIM. A 1–4B model will often miss matches or
+emit expressions that do not compile. The validator catches those, but you then fix them by hand.
+7B and up is a sensible floor. Run the live smoke test (see *Testing*) to check a model before
+you rely on it.
 
 ## The demo databases
 
@@ -101,8 +140,14 @@ dotnet test                      # engine, AI contracts, API — no API key need
 cd web && ng test --watch=false  # Angular components
 ```
 
-The live model test is skipped unless `SQLMIGRATOR_AI_LIVE=1`, `NVIDIA_API_KEY` and
-`SQLMIGRATOR_AI_MODEL` are all set.
+The live model test is skipped unless `SQLMIGRATOR_AI_LIVE=1` and `SQLMIGRATOR_AI_MODEL` are
+set, together with either `NVIDIA_API_KEY` or `SQLMIGRATOR_AI_PROVIDER=Ollama`.
+`SQLMIGRATOR_AI_BASEURL` overrides the provider's default address. To check an Ollama model:
+
+```powershell
+$env:SQLMIGRATOR_AI_LIVE = "1"; $env:SQLMIGRATOR_AI_PROVIDER = "Ollama"; $env:SQLMIGRATOR_AI_MODEL = "qwen2.5-coder:7b"
+dotnet test src/SqlMigrator.Ai.Tests --filter LiveModelSmokeTests
+```
 
 The database-backed tests use `localhost` unless `SQLMIGRATOR_TEST_SQL` names another
 server. They create and drop the four `SqlMigratorDemo_*` / `SqlMigratorApiDemo_*`
@@ -114,12 +159,14 @@ databases and nothing else.
 
 | Setting | Default | Notes |
 |---|---|---|
-| `Ai:BaseUrl` | `https://integrate.api.nvidia.com/v1` | Any OpenAI-compatible endpoint. Point it at a self-hosted NIM container to keep everything local |
-| `Ai:Model` | *(none)* | A model id from the NIM catalogue. Must support JSON-mode output |
-| `Ai:ApiKey` | *(empty)* | `NVIDIA_API_KEY` is preferred; never commit a key |
+| `Ai:Provider` | `OpenAi` | `OpenAi` for any OpenAI-compatible endpoint (NIM, LM Studio, vLLM, llama.cpp server); `Ollama` for Ollama's native API. Anything else refuses to start |
+| `Ai:BaseUrl` | `https://integrate.api.nvidia.com/v1`, or `http://localhost:11434` for Ollama | For `OpenAi`, the URL `/chat/completions` hangs off. For `Ollama`, the server root — no `/v1` |
+| `Ai:Model` | *(none)* | The model id as the provider names it (NIM catalogue id, or a name from `ollama list`). Must support JSON-mode output |
+| `Ai:ApiKey` | *(empty)* | For NIM, `NVIDIA_API_KEY` is preferred; never commit a key. Optional for local servers, and sent only when set |
 | `Ai:ConfidenceThreshold` | `0.75` | At or above this, a proposal arrives pre-ticked in the review grid |
-| `Ai:TimeoutSeconds` | `120` | Per request, applied as a linked cancellation |
-| `Ai:ColumnBatchSize` | `5` | Table pairs mapped per column-mapping request. `1` reproduces one request per table pair |
+| `Ai:TimeoutSeconds` | `120`, or `600` for Ollama | Per request, applied as a linked cancellation |
+| `Ai:ColumnBatchSize` | `5` | Table pairs mapped per column-mapping request. `1` reproduces one request per table pair. Small local models do better at `1`–`2` |
+| `Ai:ContextLength` | `8192` | Ollama only: the context window (`num_ctx`) requested per call. `0` leaves it to the server |
 
 ### How many requests a run makes, and the trade
 
@@ -136,7 +183,8 @@ That count is per analysis. The API keeps one analysis at a time, and **starting
 cancels the previous run** the moment it is superseded, so pressing Analyse again, or coming
 back from a failed run and retrying, never leaves an abandoned run calling the model in the
 background. The API's console log is the ground truth for what actually went out: every
-outgoing model call is logged as `Start processing HTTP request POST …/chat/completions`.
+outgoing model call is logged as `Start processing HTTP request POST …/chat/completions`
+(`…/api/chat` for Ollama).
 
 Batching buys far fewer requests — and so far fewer rate-limit refusals — at one real cost:
 **a provider failure now costs the whole batch rather than a single table.** The failure
@@ -169,7 +217,8 @@ proxy. `ng serve` on `:4200` also works for front-end work; `web/proxy.conf.json
 ## Security
 
 - Windows authentication only; no database credential is stored, typed, or generated
-- The NVIDIA key stays server-side. `appsettings.Local.json` is gitignored
+- The NVIDIA key stays server-side. `appsettings.Local.json` is gitignored. With
+  `Ai:Provider` set to `Ollama`, no request leaves the machine at all
 - Only schema metadata is sent to the model — never a data row. `SqlMigrator.Ai` has no
   reference to `Microsoft.Data.SqlClient`, so this is enforced by the project graph
 - The API binds to `127.0.0.1` only

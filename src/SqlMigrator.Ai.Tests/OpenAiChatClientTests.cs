@@ -3,24 +3,24 @@ using System.Text.Json;
 
 namespace SqlMigrator.Ai.Tests;
 
-public class NimChatClientTests
+public class OpenAiChatClientTests
 {
     private const string SuccessBody = """
         {"choices":[{"message":{"role":"assistant","content":"{\"matches\":[]}"}}]}
         """;
 
-    private static (NimChatClient Client, StubHandler Handler) Build(
-        HttpStatusCode status = HttpStatusCode.OK, string body = SuccessBody)
+    private static (OpenAiChatClient Client, StubHandler Handler) Build(
+        HttpStatusCode status = HttpStatusCode.OK, string body = SuccessBody, string apiKey = "nvapi-secret-value")
     {
         var handler = new StubHandler(status, body);
         var http = new HttpClient(handler);
         var options = new AiOptions
         {
             BaseUrl = "https://example.invalid/v1",
-            ApiKey = "nvapi-secret-value",
+            ApiKey = apiKey,
             Model = "test/model"
         };
-        return (new NimChatClient(http, options), handler);
+        return (new OpenAiChatClient(http, options), handler);
     }
 
     [Fact]
@@ -67,6 +67,16 @@ public class NimChatClientTests
     }
 
     [Fact]
+    public async Task Sends_no_authorization_header_without_a_key()
+    {
+        var (client, handler) = Build(apiKey: "");
+
+        await client.CompleteJsonAsync("s", "u");
+
+        Assert.Null(handler.LastRequest!.Headers.Authorization);
+    }
+
+    [Fact]
     public async Task An_error_response_throws_without_leaking_the_key()
     {
         var (client, _) = Build(HttpStatusCode.Unauthorized, """{"error":"invalid api key"}""");
@@ -101,20 +111,9 @@ public class NimChatClientTests
             Model = "test/model",
             TimeoutSeconds = 0
         };
-        var client = new NimChatClient(http, options);
+        var client = new OpenAiChatClient(http, options);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => client.CompleteJsonAsync("s", "u"));
-    }
-
-    /// <summary>Never completes on its own; only returns once its cancellation token fires.</summary>
-    private sealed class BlockingHandler : HttpMessageHandler
-    {
-        protected override async Task<HttpResponseMessage> SendAsync(
-            HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-            throw new InvalidOperationException("unreachable: Task.Delay should have thrown on cancellation.");
-        }
     }
 }

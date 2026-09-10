@@ -22,3 +22,22 @@ public sealed class StubHandler(HttpStatusCode status, string body) : HttpMessag
         };
     }
 }
+
+/// <summary>Never completes on its own; only returns once its cancellation token fires.</summary>
+public sealed class BlockingHandler : HttpMessageHandler
+{
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        throw new InvalidOperationException("unreachable: Task.Delay should have thrown on cancellation.");
+    }
+}
+
+/// <summary>Fails the way HttpClient does when nothing is listening on the port.</summary>
+public sealed class RefusingHandler : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken) =>
+        throw new HttpRequestException("No connection could be made because the target machine actively refused it.");
+}
