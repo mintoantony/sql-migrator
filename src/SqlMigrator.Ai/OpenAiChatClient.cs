@@ -5,10 +5,10 @@ using System.Text.Json;
 namespace SqlMigrator.Ai;
 
 /// <summary>
-/// Talks the OpenAI-compatible chat-completions surface. NVIDIA NIM is the default,
-/// but any provider on that surface works by changing BaseUrl.
+/// Talks the OpenAI-compatible chat-completions surface. NVIDIA NIM is the default, but any
+/// provider on that surface works by changing BaseUrl. For Ollama use <see cref="OllamaChatClient"/>.
 /// </summary>
-public sealed class NimChatClient(HttpClient http, AiOptions options) : IChatClient
+public sealed class OpenAiChatClient(HttpClient http, AiOptions options) : IChatClient
 {
     public async Task<string> CompleteJsonAsync(
         string systemPrompt, string userPrompt, CancellationToken ct = default)
@@ -34,7 +34,10 @@ public sealed class NimChatClient(HttpClient http, AiOptions options) : IChatCli
                 }
             })
         };
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
+
+        // Local servers (LM Studio, vLLM, llama.cpp) usually need no key; an empty bearer is noise.
+        if (!string.IsNullOrEmpty(options.ApiKey))
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
 
         using var response = await http.SendAsync(request, linkedCts.Token);
         var body = await response.Content.ReadAsStringAsync(linkedCts.Token);

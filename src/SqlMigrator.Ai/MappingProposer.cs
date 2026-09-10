@@ -253,8 +253,9 @@ public sealed class MappingProposer(IChatClient client, AiOptions options)
     /// provider-side timeout — is recorded in <paramref name="failures"/> and the caller moves on
     /// to the next table. A genuine caller cancellation (the caller's own <paramref name="ct"/>
     /// firing) is different: it must abort the whole run, so it is left to propagate rather than
-    /// being collected as a per-table failure. <see cref="NimChatClient"/> implements its
-    /// per-request timeout as a token linked to <paramref name="ct"/>, so a timeout also surfaces
+    /// being collected as a per-table failure. <see cref="OpenAiChatClient"/> and
+    /// <see cref="OllamaChatClient"/> implement their per-request timeout as a token linked to
+    /// <paramref name="ct"/>, so a timeout also surfaces
     /// as <see cref="OperationCanceledException"/> — the two are told apart by checking whether
     /// the caller's own token is the one that actually fired.
     /// </summary>

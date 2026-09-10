@@ -12,24 +12,33 @@ builder.WebHost.UseUrls("http://127.0.0.1:5199");
 builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true);
 
 builder.Services.AddSingleton<SessionStore>();
-builder.Services.AddHttpClient();
+
+// No client-level timeout: the chat clients enforce Ai:TimeoutSeconds per request. Left at
+// HttpClient's 100-second default, this silently capped every model call below that setting.
+builder.Services.AddHttpClient("ai", client => client.Timeout = Timeout.InfiniteTimeSpan);
+
+var provider = AiOptions.ParseProvider(builder.Configuration["Ai:Provider"]);
 
 builder.Services.AddSingleton(_ => new AiOptions
 {
-    BaseUrl = builder.Configuration["Ai:BaseUrl"] ?? "https://integrate.api.nvidia.com/v1",
+    Provider = provider,
+    BaseUrl = builder.Configuration["Ai:BaseUrl"] ?? AiOptions.DefaultBaseUrl(provider),
     // The key is server-side only: environment variable first, then the gitignored local
     // settings file. Never sourced from a request, never returned by an endpoint or logged.
-    ApiKey = Environment.GetEnvironmentVariable("NVIDIA_API_KEY")
+    // NVIDIA_API_KEY is not offered to Ollama: a key set machine-wide for NIM has no business
+    // being sent to whatever host Ai:BaseUrl names.
+    ApiKey = (provider == AiProvider.Ollama ? null : Environment.GetEnvironmentVariable("NVIDIA_API_KEY"))
              ?? builder.Configuration["Ai:ApiKey"] ?? "",
     Model = builder.Configuration["Ai:Model"] ?? "",
     ConfidenceThreshold = double.TryParse(builder.Configuration["Ai:ConfidenceThreshold"], out var t) ? t : 0.75,
-    TimeoutSeconds = int.TryParse(builder.Configuration["Ai:TimeoutSeconds"], out var timeout) ? timeout : 120,
-    ColumnBatchSize = int.TryParse(builder.Configuration["Ai:ColumnBatchSize"], out var batch) ? batch : 5
+    TimeoutSeconds = int.TryParse(builder.Configuration["Ai:TimeoutSeconds"], out var timeout)
+        ? timeout : AiOptions.DefaultTimeoutSeconds(provider),
+    ColumnBatchSize = int.TryParse(builder.Configuration["Ai:ColumnBatchSize"], out var batch) ? batch : 5,
+    ContextLength = int.TryParse(builder.Configuration["Ai:ContextLength"], out var context) ? context : 8192
 });
 
-builder.Services.AddSingleton<IChatClient>(sp => new NimChatClient(
-    sp.GetRequiredService<IHttpClientFactory>().CreateClient(),
-    sp.GetRequiredService<AiOptions>()));
+builder.Services.AddSingleton<IChatClient>(sp => sp.GetRequiredService<AiOptions>()
+    .CreateClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient("ai")));
 
 var app = builder.Build();
 

@@ -3,30 +3,41 @@ using SqlMigrator.Model.Schema;
 namespace SqlMigrator.Ai.Tests;
 
 /// <summary>
-/// The only test that talks to NVIDIA. Skipped unless SQLMIGRATOR_AI_LIVE=1 and
-/// NVIDIA_API_KEY are both set, so CI never needs a key and never spends money.
-/// Run it once when choosing the model — this is the acceptance criterion from spec §6.
+/// The only test that talks to a real model. Skipped unless SQLMIGRATOR_AI_LIVE=1, so CI never
+/// needs a model and never spends money. SQLMIGRATOR_AI_PROVIDER picks the provider (OpenAi, the
+/// default, needs NVIDIA_API_KEY; Ollama needs a running local server) and SQLMIGRATOR_AI_BASEURL
+/// optionally overrides where it lives. Run it once when choosing the model — this is the
+/// acceptance criterion from spec §6.
 /// </summary>
-public class LiveNimSmokeTests
+public class LiveModelSmokeTests
 {
+    private static AiProvider Provider =>
+        AiOptions.ParseProvider(Environment.GetEnvironmentVariable("SQLMIGRATOR_AI_PROVIDER"));
+
     private static bool Enabled =>
         Environment.GetEnvironmentVariable("SQLMIGRATOR_AI_LIVE") == "1"
-        && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NVIDIA_API_KEY"));
+        && (Provider == AiProvider.Ollama
+            || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NVIDIA_API_KEY")));
 
     [SkippableFact]
     public async Task Proposes_a_mapping_for_the_demo_schemas_without_retry()
     {
-        Skip.IfNot(Enabled, "Set SQLMIGRATOR_AI_LIVE=1 and NVIDIA_API_KEY to run the live smoke test.");
+        Skip.IfNot(Enabled,
+            "Set SQLMIGRATOR_AI_LIVE=1, plus NVIDIA_API_KEY or SQLMIGRATOR_AI_PROVIDER=Ollama, to run the live smoke test.");
 
+        var provider = Provider;
         var options = new AiOptions
         {
-            ApiKey = Environment.GetEnvironmentVariable("NVIDIA_API_KEY")!,
+            Provider = provider,
+            BaseUrl = Environment.GetEnvironmentVariable("SQLMIGRATOR_AI_BASEURL") ?? AiOptions.DefaultBaseUrl(provider),
+            ApiKey = provider == AiProvider.Ollama ? "" : Environment.GetEnvironmentVariable("NVIDIA_API_KEY")!,
             Model = Environment.GetEnvironmentVariable("SQLMIGRATOR_AI_MODEL")
-                    ?? throw new InvalidOperationException("Set SQLMIGRATOR_AI_MODEL to the model under evaluation.")
+                    ?? throw new InvalidOperationException("Set SQLMIGRATOR_AI_MODEL to the model under evaluation."),
+            TimeoutSeconds = AiOptions.DefaultTimeoutSeconds(provider)
         };
 
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds) };
-        var proposer = new MappingProposer(new NimChatClient(http, options), options);
+        using var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        var proposer = new MappingProposer(options.CreateClient(http), options);
 
         var result = await proposer.ProposeAsync(DemoSchemas.Source(), DemoSchemas.Target(), "[Src]");
 
